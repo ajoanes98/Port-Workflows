@@ -32,7 +32,7 @@ jobs:
           link="${{ fromJson(inputs.port_context).prLink }}"
           pr_number="${{ fromJson(inputs.port_context).prNumber }}"
           org="ajoanes98"
-          repo_info="${org}/${repo_name}"
+          repo_info="${{ fromJson(inputs.port_context).repository }}"
       
           if [ -z "$repo_info" ] || [ -z "$pr_number" ]; then
             result="400"
