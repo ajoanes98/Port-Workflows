@@ -31,7 +31,8 @@ jobs:
         run: |
           link="${{ fromJson(inputs.port_context).prLink }}"
           pr_number="${{ fromJson(inputs.port_context).prNumber }}"
-          repo_info="${{ fromJson(inputs.port_context).repository }}"
+          org="ajoanes98"
+          repo_info="${org}/${repo_name}"
       
           if [ -z "$repo_info" ] || [ -z "$pr_number" ]; then
             result="400"
