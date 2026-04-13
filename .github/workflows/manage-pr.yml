@@ -29,10 +29,17 @@ jobs:
       - name: Extract Repository and PR Number
         id: extract_info
         run: |
-          link="${{ fromJson(inputs.port_context).entity.properties.link }}"
-          repo_info=$(echo "$link" | sed 's|https://github.com/||' | awk -F'/' '{print $1 "/" $2}')
-          pr_number=$(echo "$link" | awk -F'/' '{print $NF}')
-
+          link="${{ fromJson(inputs.port_context).prLink }}"
+          pr_number="${{ fromJson(inputs.port_context).prNumber }}"
+          repo_info="${{ fromJson(inputs.port_context).repository }}"
+      
+          if [ -z "$repo_info" ] || [ -z "$pr_number" ]; then
+            result="400"
+            result_message="Failed to extract repository and PR number."
+            echo $result_message
+            exit 1
+          fi
+      
           echo "REPO_INFO=$repo_info" >> $GITHUB_ENV
           echo "PR_NUMBER=$pr_number" >> $GITHUB_ENV
 
