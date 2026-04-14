@@ -38,15 +38,25 @@ jobs:
       - name: Report success to Port
         if: env.DELETE_STATUS == 'success'
         run: |
-          curl -X PATCH "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}" \
-            -H "Authorization: Bearer ${{ secrets.PORT_CLIENT_SECRET }}" \
+          token=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"${{ secrets.PORT_CLIENT_ID }}\", \"clientSecret\": \"${{ secrets.PORT_CLIENT_SECRET }}\"}" \
+            | jq -r '.accessToken')
+          
+          curl -s -X PATCH "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}" \
+            -H "Authorization: Bearer $token" \
             -H "Content-Type: application/json" \
             -d '{"status": "SUCCESS", "message": {"run_status": "Repository deleted successfully"}}'
 
       - name: Report failure to Port
         if: env.DELETE_STATUS == 'failure'
         run: |
-          curl -X PATCH "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}" \
-            -H "Authorization: Bearer ${{ secrets.PORT_CLIENT_SECRET }}" \
+          token=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"${{ secrets.PORT_CLIENT_ID }}\", \"clientSecret\": \"${{ secrets.PORT_CLIENT_SECRET }}\"}" \
+            | jq -r '.accessToken')
+          
+          curl -s -X PATCH "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}" \
+            -H "Authorization: Bearer $token" \
             -H "Content-Type: application/json" \
             -d "{\"status\": \"FAILURE\", \"message\": {\"run_status\": \"Failed to delete repository. HTTP status: $HTTP_STATUS\"}}"
