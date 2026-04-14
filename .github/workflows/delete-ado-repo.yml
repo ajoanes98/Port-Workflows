@@ -20,48 +20,72 @@ jobs:
   delete-repo:
     runs-on: ubuntu-latest
     steps:
+      - name: Get Port Access Token
+        id: port_token
+        run: |
+          token=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"${{ secrets.PORT_CLIENT_ID }}\", \"clientSecret\": \"${{ secrets.PORT_CLIENT_SECRET }}\"}" \
+            | jq -r '.accessToken')
+          echo "PORT_TOKEN=$token" >> $GITHUB_ENV
+
+      - name: Log - Starting deletion
+        run: |
+          curl -s -X POST "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer $PORT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"message": "🚀 Starting deletion of ADO repository..."}'
+
       - name: Delete ADO Repository
         env:
           ADO_TOKEN: ${{ secrets.ADO_TOKEN }}
           PROJECT_NAME: ${{ github.event.inputs.project_name }}
           REPOSITORY_ID: ${{ github.event.inputs.repository_id }}
         run: |
+          curl -s -X POST "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer $PORT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"🔧 Calling Azure DevOps API for project: $PROJECT_NAME, repo: $REPOSITORY_ID\"}"
+
           ENCODED_TOKEN=$(printf '%s' ":$ADO_TOKEN" | base64 | tr -d '\n')
           response=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
             "https://dev.azure.com/ajoanes98/${PROJECT_NAME}/_apis/git/repositories/${REPOSITORY_ID}?api-version=7.1" \
             -H "Authorization: Basic ${ENCODED_TOKEN}")
-          
+
           echo "HTTP response: $response"
-          
+
           if [ "$response" = "204" ]; then
             echo "DELETE_STATUS=success" >> $GITHUB_ENV
+            curl -s -X POST "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}/logs" \
+              -H "Authorization: Bearer $PORT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{"message": "✅ ADO API call successful (HTTP 204)"}'
           else
             echo "DELETE_STATUS=failure" >> $GITHUB_ENV
             echo "HTTP_STATUS=$response" >> $GITHUB_ENV
+            curl -s -X POST "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}/logs" \
+              -H "Authorization: Bearer $PORT_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"message\": \"❌ ADO API call failed with HTTP status: $response\"}"
           fi
 
       - name: Report success to Port
         if: env.DELETE_STATUS == 'success'
         run: |
-          token=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
+          curl -s -X POST "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer $PORT_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"clientId\": \"${{ secrets.PORT_CLIENT_ID }}\", \"clientSecret\": \"${{ secrets.PORT_CLIENT_SECRET }}\"}" \
-            | jq -r '.accessToken')
-          
+            -d '{"message": "🎉 Repository deleted successfully. Updating Port run status..."}'
+
           curl -s -X PATCH "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}" \
-            -H "Authorization: Bearer $token" \
+            -H "Authorization: Bearer $PORT_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"status": "SUCCESS", "message": {"run_status": "Repository deleted successfully"}}'
 
       - name: Report failure to Port
         if: env.DELETE_STATUS == 'failure'
         run: |
-          token=$(curl -s -X POST "https://api.port.io/v1/auth/access_token" \
-            -H "Content-Type: application/json" \
-            -d "{\"clientId\": \"${{ secrets.PORT_CLIENT_ID }}\", \"clientSecret\": \"${{ secrets.PORT_CLIENT_SECRET }}\"}" \
-            | jq -r '.accessToken')
-          
           curl -s -X PATCH "https://api.port.io/v1/actions/runs/${{ github.event.inputs.port_run_id }}" \
-            -H "Authorization: Bearer $token" \
+            -H "Authorization: Bearer $PORT_TOKEN" \
             -H "Content-Type: application/json" \
             -d "{\"status\": \"FAILURE\", \"message\": {\"run_status\": \"Failed to delete repository. HTTP status: $HTTP_STATUS\"}}"
