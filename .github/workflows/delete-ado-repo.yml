@@ -26,7 +26,7 @@ jobs:
         run: |
           response=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
             "https://dev.azure.com/ajoanes98/${{ github.event.inputs.project_name }}/_apis/git/repositories/${{ github.event.inputs.repository_id }}?api-version=7.1" \
-            -H "Authorization: Basic $(echo -n ':${{ secrets.ADO_TOKEN }}' | base64)")
+            -H "Authorization: Basic $ENCODED_TOKEN")
           
           if [ "$response" = "204" ]; then
             echo "DELETE_STATUS=success" >> $GITHUB_ENV
