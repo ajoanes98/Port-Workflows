@@ -23,10 +23,15 @@ jobs:
       - name: Delete ADO Repository
         env:
           ADO_TOKEN: ${{ secrets.ADO_TOKEN }}
+          PROJECT_NAME: ${{ github.event.inputs.project_name }}
+          REPOSITORY_ID: ${{ github.event.inputs.repository_id }}
         run: |
+          ENCODED_TOKEN=$(printf '%s' ":$ADO_TOKEN" | base64 | tr -d '\n')
           response=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-            "https://dev.azure.com/ajoanes98/${{ github.event.inputs.project_name }}/_apis/git/repositories/${{ github.event.inputs.repository_id }}?api-version=7.1" \
-            -H "Authorization: Basic $ENCODED_TOKEN")
+            "https://dev.azure.com/ajoanes98/${PROJECT_NAME}/_apis/git/repositories/${REPOSITORY_ID}?api-version=7.1" \
+            -H "Authorization: Basic ${ENCODED_TOKEN}")
+          
+          echo "HTTP response: $response"
           
           if [ "$response" = "204" ]; then
             echo "DELETE_STATUS=success" >> $GITHUB_ENV
