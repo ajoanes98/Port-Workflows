@@ -24,7 +24,7 @@ jobs:
         with:
           repository: "${{ fromJson(inputs.port_context).entity }}"
           path: ./targetRepo
-          token: ${{ secrets.ORG_ADMIN_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}
       - name: Copy template file
         run: |
           mkdir -p ./targetRepo/resources
