@@ -1,5 +1,8 @@
 name: Comment on PR
 
+env:
+    PEM: ${{ secrets.PORT_GITHUB_APP_PEM }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -42,7 +45,7 @@ jobs:
           import os, time, jwt, requests
 
           # Load environment variables
-          pem = os.environ['PEM']
+          pem = os.environ['PEM'].replace('\\n', '\n')
           app_id = os.environ['APP_ID']
           installation_id = os.environ['INSTALLATION_ID']
           comment = os.environ['COMMENT']
