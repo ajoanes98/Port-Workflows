@@ -120,12 +120,16 @@ jobs:
       - name: Fetch Dockerfile entity from Port
         id: fetch_dockerfile
         shell: python3 {0}
+        env:
+          ENTITY_ID: ${{ inputs.dockerfile_entity }}
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
         run: |
           import json, os, sys, urllib.request
 
-          client_id     = "${{ secrets.PORT_CLIENT_ID }}"
-          client_secret = "${{ secrets.PORT_CLIENT_SECRET }}"
-          entity_id     = "${{ inputs.dockerfile_entity }}"
+          client_id     = os.environ["PORT_CLIENT_ID"]
+          client_secret = os.environ["PORT_CLIENT_SECRET"]
+          entity_id     = os.environ["ENTITY_ID"]
           base_url      = "https://api.getport.io/v1"
 
           auth_payload = json.dumps({"clientId": client_id, "clientSecret": client_secret}).encode()
