@@ -172,7 +172,44 @@ jobs:
           echo "idle_timeout=${IDLE}" >> $GITHUB_OUTPUT
           echo "running_timeout=${RUNNING_SECS}" >> $GITHUB_OUTPUT
 
-      # ── 5. Build gcloud create command flags ─────────────────────────────
+      # ── 5. Ensure Workstation Cluster exists ──────────────────────────────
+      - name: Ensure Workstation Cluster exists
+        run: |
+          CLUSTER="${{ inputs.cluster }}"
+          REGION="${{ inputs.region }}"
+          PROJECT="${{ secrets.GCP_PROJECT_ID }}"
+
+          if gcloud workstations clusters describe "$CLUSTER" \
+              --region="$REGION" \
+              --project="$PROJECT" \
+              --format="value(name)" 2>/dev/null; then
+            echo "Cluster '$CLUSTER' already exists — skipping creation."
+          else
+            echo "Cluster '$CLUSTER' not found — creating (this may take a few minutes)..."
+            gcloud workstations clusters create "$CLUSTER" \
+              --region="$REGION" \
+              --project="$PROJECT" \
+              --async
+            echo "Waiting for cluster '$CLUSTER' to be ready..."
+            for i in $(seq 1 30); do
+              STATE=$(gcloud workstations clusters describe "$CLUSTER" \
+                --region="$REGION" \
+                --project="$PROJECT" \
+                --format="value(state)" 2>/dev/null || echo "UNKNOWN")
+              echo "Attempt $i/30 — cluster state: $STATE"
+              if [ "$STATE" = "STATE_RUNNING" ] || [ "$STATE" = "RUNNING" ]; then
+                echo "Cluster '$CLUSTER' is ready."
+                break
+              fi
+              if [ "$i" = "30" ]; then
+                echo "::error::Cluster '$CLUSTER' did not reach RUNNING state within timeout."
+                exit 1
+              fi
+              sleep 20
+            done
+          fi
+
+      # ── 6. Create Workstation Config via gcloud ───────────────────────────
       - name: Create Workstation Config via gcloud
         id: create_config
         run: |
