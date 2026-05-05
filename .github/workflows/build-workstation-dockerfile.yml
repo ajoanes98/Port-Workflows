@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      id-token: write  # Required for Workload Identity Federation
 
     steps:
       # ── 1. Notify Port: in progress ──────────────────────────────────────
@@ -73,7 +73,7 @@ jobs:
           status: "IN_PROGRESS"
           logMessage: "Generating Dockerfile for '${{ inputs.dockerfile_name }}' with tools: ${{ inputs.tools }}"
 
-      # ── 2. Authenticate to GCP ────────────────────────────────────────────
+      # ── 2. Authenticate to GCP via Workload Identity Federation ────────────
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -296,7 +296,19 @@ jobs:
           echo "image_tag=$TAG" >> $GITHUB_OUTPUT
           echo "registry_path=$FULL_IMAGE" >> $GITHUB_OUTPUT
 
-      # ── 6. Capture Dockerfile content for Port entity ─────────────────────
+      # ── 6. Convert tools to JSON array ───────────────────────────────────
+      - name: Convert tools to JSON array
+        id: tools_json
+        run: |
+          TOOLS="${{ inputs.tools }}"
+          if [ -z "$TOOLS" ] || [ "$TOOLS" = "null" ]; then
+            echo "json=[]" >> $GITHUB_OUTPUT
+          else
+            JSON=$(echo "$TOOLS" | python3 -c "import sys,json; t=sys.stdin.read().strip(); print(json.dumps([x.strip() for x in t.split(',') if x.strip()]))")
+            echo "json=$JSON" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 7. Capture Dockerfile content for Port entity ─────────────────────
       - name: Capture Dockerfile content
         id: dockerfile_content
         run: |
@@ -318,7 +330,7 @@ jobs:
           runId: ${{ inputs.port_run_id }}
           properties: |
             {
-              "tools": "${{ inputs.tools }}".split(",").map(t => t.trim()),
+              "tools": ${{ steps.tools_json.outputs.json }},
               "base_image": "${{ inputs.base_image }}",
               "image_tag": "${{ steps.docker_build.outputs.full_image }}",
               "registry_path": "${{ steps.docker_build.outputs.registry_path }}",
@@ -359,7 +371,7 @@ jobs:
           properties: |
             {
               "build_status": "FAILED",
-              "tools": "${{ inputs.tools }}".split(",").map(t => t.trim()),
+              "tools": ${{ steps.tools_json.outputs.json }},
               "base_image": "${{ inputs.base_image }}"
             }
 
