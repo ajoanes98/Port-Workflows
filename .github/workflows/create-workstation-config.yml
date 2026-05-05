@@ -119,27 +119,38 @@ jobs:
       # ── 3. Fetch container image URI from Port entity ─────────────────────
       - name: Fetch Dockerfile entity from Port
         id: fetch_dockerfile
+        shell: python3 {0}
         run: |
-          set -euo pipefail
+          import json, os, sys, urllib.request
 
-          RESPONSE=$(curl -s -X GET \
-            "https://api.getport.io/v1/blueprints/gcp_dockerfile/entities/${{ inputs.dockerfile_entity }}" \
-            -H "Authorization: Bearer $(curl -s -X POST https://api.getport.io/v1/auth/access_token \
-              -H 'Content-Type: application/json' \
-              -d '{"clientId":"${{ secrets.PORT_CLIENT_ID }}","clientSecret":"${{ secrets.PORT_CLIENT_SECRET }}"}' \
-              | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessToken"])')" \
-            -H "Content-Type: application/json")
+          client_id     = "${{ secrets.PORT_CLIENT_ID }}"
+          client_secret = "${{ secrets.PORT_CLIENT_SECRET }}"
+          entity_id     = "${{ inputs.dockerfile_entity }}"
+          base_url      = "https://api.getport.io/v1"
 
-          CONTAINER_IMAGE=$(echo "$RESPONSE" | python3 -c \
-            "import sys,json; d=json.load(sys.stdin); print(d['entity']['properties'].get('registry_path',''))")
+          auth_payload = json.dumps({"clientId": client_id, "clientSecret": client_secret}).encode()
+          req = urllib.request.Request(
+              f"{base_url}/auth/access_token",
+              data=auth_payload,
+              headers={"Content-Type": "application/json"})
+          with urllib.request.urlopen(req) as r:
+              token = json.loads(r.read())["accessToken"]
 
-          if [ -z "$CONTAINER_IMAGE" ]; then
-            echo "::error::Could not resolve container image from Dockerfile entity '${{ inputs.dockerfile_entity }}'"
-            exit 1
-          fi
+          req2 = urllib.request.Request(
+              f"{base_url}/blueprints/gcp_dockerfile/entities/{entity_id}",
+              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+          with urllib.request.urlopen(req2) as r:
+              data = json.loads(r.read())
 
-          echo "container_image=$CONTAINER_IMAGE" >> $GITHUB_OUTPUT
-          echo "Resolved container image: $CONTAINER_IMAGE"
+          container_image = data["entity"]["properties"].get("registry_path", "")
+          print(f"Resolved container image: {container_image}")
+
+          if not container_image:
+              print("::error::Could not resolve registry_path from Dockerfile entity")
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"container_image={container_image}\n")
 
       # ── 4. Convert timeouts ───────────────────────────────────────────────
       - name: Compute timeout values
