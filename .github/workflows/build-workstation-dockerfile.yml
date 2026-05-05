@@ -70,7 +70,6 @@ jobs:
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
-          status: "IN_PROGRESS"
           logMessage: "Generating Dockerfile for '${{ inputs.dockerfile_name }}' with tools: ${{ inputs.tools }}"
 
       # ── 1b. Convert tools input to JSON array (always runs) ───────────────
