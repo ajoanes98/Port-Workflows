@@ -129,8 +129,15 @@ jobs:
 
           client_id     = os.environ["PORT_CLIENT_ID"]
           client_secret = os.environ["PORT_CLIENT_SECRET"]
-          entity_id     = os.environ["ENTITY_ID"]
+          entity_raw    = os.environ["ENTITY_ID"]
           base_url      = "https://api.getport.io/v1"
+
+          # Port may pass the full entity object or just the identifier string
+          try:
+              entity_obj = json.loads(entity_raw)
+              entity_id  = entity_obj.get("identifier", entity_raw)
+          except (json.JSONDecodeError, AttributeError):
+              entity_id  = entity_raw.strip()
 
           auth_payload = json.dumps({"clientId": client_id, "clientSecret": client_secret}).encode()
           req = urllib.request.Request(
