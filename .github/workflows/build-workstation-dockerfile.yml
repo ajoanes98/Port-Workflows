@@ -355,7 +355,6 @@ jobs:
             {
               "tools": ${{ steps.tools_json.outputs.json }},
               "base_image": "${{ inputs.base_image }}",
-              "image_tag": "${{ steps.docker_build.outputs.full_image }}",
               "registry_path": "${{ steps.docker_build.outputs.registry_path }}",
               "dockerfile_content": "Built from: ${{ inputs.base_image }}\nTools: ${{ inputs.tools }}\nImage: ${{ steps.docker_build.outputs.full_image }}",
               "build_status": "SUCCESS",
