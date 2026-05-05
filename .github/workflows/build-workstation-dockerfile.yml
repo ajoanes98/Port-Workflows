@@ -77,11 +77,24 @@ jobs:
         id: tools_json
         if: always()
         run: |
-          TOOLS="${{ inputs.tools }}"
-          if [ -z "$TOOLS" ] || [ "$TOOLS" = "null" ]; then
+          TOOLS='${{ inputs.tools }}'
+          if [ -z "$TOOLS" ] || [ "$TOOLS" = "null" ] || [ "$TOOLS" = "[]" ]; then
             echo "json=[]" >> $GITHUB_OUTPUT
           else
-            JSON=$(echo "$TOOLS" | python3 -c "import sys,json; t=sys.stdin.read().strip(); print(json.dumps([x.strip() for x in t.split(',') if x.strip()]))")
+            # Input is already a JSON array string e.g. ["python3","vscode-server"]
+            JSON=$(echo "$TOOLS" | python3 -c "
+import sys, json
+raw = sys.stdin.read().strip()
+try:
+    parsed = json.loads(raw)
+    if isinstance(parsed, list):
+        print(json.dumps(parsed))
+    else:
+        print(json.dumps([raw]))
+except Exception:
+    # Fallback: treat as comma-separated
+    print(json.dumps([x.strip() for x in raw.split(',') if x.strip()]))
+")
             echo "json=$JSON" >> $GITHUB_OUTPUT
           fi
 
@@ -128,8 +141,22 @@ jobs:
         id: generate
         run: |
           set -euo pipefail
-          TOOLS="${{ inputs.tools }}"
+          TOOLS_RAW='${{ inputs.tools }}'
           BASE_IMAGE="${{ inputs.base_image }}"
+
+          # Convert JSON array to comma-separated string for grep checks
+          TOOLS=$(echo "$TOOLS_RAW" | python3 -c "
+import sys, json
+raw = sys.stdin.read().strip()
+try:
+    parsed = json.loads(raw)
+    if isinstance(parsed, list):
+        print(','.join(parsed))
+    else:
+        print(raw)
+except:
+    print(raw)
+")
 
           cat > Dockerfile << 'DOCKERFILE_EOF'
           FROM __BASE_IMAGE__
