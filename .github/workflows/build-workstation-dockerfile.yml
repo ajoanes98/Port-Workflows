@@ -73,6 +73,19 @@ jobs:
           status: "IN_PROGRESS"
           logMessage: "Generating Dockerfile for '${{ inputs.dockerfile_name }}' with tools: ${{ inputs.tools }}"
 
+      # ── 1b. Convert tools input to JSON array (always runs) ───────────────
+      - name: Convert tools to JSON array
+        id: tools_json
+        if: always()
+        run: |
+          TOOLS="${{ inputs.tools }}"
+          if [ -z "$TOOLS" ] || [ "$TOOLS" = "null" ]; then
+            echo "json=[]" >> $GITHUB_OUTPUT
+          else
+            JSON=$(echo "$TOOLS" | python3 -c "import sys,json; t=sys.stdin.read().strip(); print(json.dumps([x.strip() for x in t.split(',') if x.strip()]))")
+            echo "json=$JSON" >> $GITHUB_OUTPUT
+          fi
+
       # ── 2. Authenticate to GCP via Workload Identity Federation ────────────
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
@@ -295,18 +308,6 @@ jobs:
           echo "full_image=$FULL_IMAGE" >> $GITHUB_OUTPUT
           echo "image_tag=$TAG" >> $GITHUB_OUTPUT
           echo "registry_path=$FULL_IMAGE" >> $GITHUB_OUTPUT
-
-      # ── 6. Convert tools to JSON array ───────────────────────────────────
-      - name: Convert tools to JSON array
-        id: tools_json
-        run: |
-          TOOLS="${{ inputs.tools }}"
-          if [ -z "$TOOLS" ] || [ "$TOOLS" = "null" ]; then
-            echo "json=[]" >> $GITHUB_OUTPUT
-          else
-            JSON=$(echo "$TOOLS" | python3 -c "import sys,json; t=sys.stdin.read().strip(); print(json.dumps([x.strip() for x in t.split(',') if x.strip()]))")
-            echo "json=$JSON" >> $GITHUB_OUTPUT
-          fi
 
       # ── 7. Capture Dockerfile content for Port entity ─────────────────────
       - name: Capture Dockerfile content
