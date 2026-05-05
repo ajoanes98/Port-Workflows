@@ -99,6 +99,29 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: |
           gcloud auth configure-docker ${{ inputs.artifact_registry_region }}-docker.pkg.dev --quiet
+          gcloud auth configure-docker gcr.io --quiet
+
+      # ── 3b. Ensure Artifact Registry repository exists ────────────────────
+      - name: Ensure Artifact Registry repository exists
+        run: |
+          REPO="${{ inputs.artifact_registry_repo }}"
+          REGION="${{ inputs.artifact_registry_region }}"
+          PROJECT="${{ secrets.GCP_PROJECT_ID }}"
+
+          if gcloud artifacts repositories describe "$REPO" \
+              --location="$REGION" \
+              --project="$PROJECT" \
+              --format="value(name)" 2>/dev/null; then
+            echo "Repository '$REPO' already exists — skipping creation."
+          else
+            echo "Repository '$REPO' not found — creating..."
+            gcloud artifacts repositories create "$REPO" \
+              --repository-format=docker \
+              --location="$REGION" \
+              --project="$PROJECT" \
+              --description="GCP Workstation container images managed by Port self-service"
+            echo "Repository '$REPO' created successfully."
+          fi
 
       # ── 4. Generate Dockerfile from tool selection ────────────────────────
       - name: Generate Dockerfile
