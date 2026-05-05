@@ -167,10 +167,10 @@ jobs:
       - name: Compute timeout values
         id: timeouts
         run: |
-          IDLE="${{ inputs.idle_timeout_seconds }}s"
+          IDLE="${{ inputs.idle_timeout_seconds }}"
           RUNNING_SECS=$(( ${{ inputs.running_timeout_hours }} * 3600 ))
           echo "idle_timeout=${IDLE}" >> $GITHUB_OUTPUT
-          echo "running_timeout=${RUNNING_SECS}s" >> $GITHUB_OUTPUT
+          echo "running_timeout=${RUNNING_SECS}" >> $GITHUB_OUTPUT
 
       # ── 5. Build gcloud create command flags ─────────────────────────────
       - name: Create Workstation Config via gcloud
@@ -187,7 +187,7 @@ jobs:
             --boot-disk-size=${{ inputs.boot_disk_size_gb }} \
             --idle-timeout=${{ steps.timeouts.outputs.idle_timeout }} \
             --running-timeout=${{ steps.timeouts.outputs.running_timeout }} \
-            --max-usable-workstations=${{ inputs.max_usable_workstations }} \
+            --max-usable-workstations-count=${{ inputs.max_usable_workstations }} \
             --container-custom-image=${{ steps.fetch_dockerfile.outputs.container_image }}"
 
           # Public IP
