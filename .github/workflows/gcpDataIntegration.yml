@@ -1,3 +1,5 @@
+name: GCP Data Integration
+
 on:
     workflow_dispatch:
     schedule:
