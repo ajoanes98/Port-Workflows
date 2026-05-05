@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      id-token: write  # Required for Workload Identity Federation
 
     steps:
       # ── 1. Notify Port: in progress ──────────────────────────────────────
@@ -104,10 +104,9 @@ jobs:
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
-          status: "IN_PROGRESS"
           logMessage: "Creating workstation config '${{ inputs.config_id }}' for team '${{ inputs.team }}'..."
 
-      # ── 2. Authenticate to GCP ────────────────────────────────────────────
+      # ── 2. Authenticate to GCP via Workload Identity Federation ────────────
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
