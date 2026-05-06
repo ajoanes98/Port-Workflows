@@ -210,8 +210,7 @@ jobs:
               "status": "${{ steps.wait_running.outputs.final_state }}",
               "workstation_url": "${{ steps.final_url.outputs.ws_url }}",
               "created_by": "${{ inputs.triggered_by }}",
-              "project_id": "${{ secrets.GCP_PROJECT_ID }}",
-              "idle_timeout": ${{ inputs.ttl_hours }}
+              "project_id": "${{ secrets.GCP_PROJECT_ID }}"
             }
 
       # ── 9. Report success ─────────────────────────────────────────────────
