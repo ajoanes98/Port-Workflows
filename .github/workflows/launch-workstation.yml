@@ -107,6 +107,7 @@ jobs:
               f.write(f"cluster={cluster}\n")
               f.write(f"region={region}\n")
               f.write(f"config_id={config_id}\n")
+              f.write(f"entity_id={entity_id}\n")
 
 
       # ── 4. Notify resolved config ─────────────────────────────────────────
@@ -156,49 +157,31 @@ jobs:
             echo "ws_url=" >> $GITHUB_OUTPUT
           fi
 
-      # ── 6. Wait for RUNNING state ─────────────────────────────────────────
-      - name: Wait for Workstation to be RUNNING
-        id: wait_running
-        run: |
-          set -euo pipefail
-          MAX_ATTEMPTS=30
-          SLEEP=10
-
-          for i in $(seq 1 $MAX_ATTEMPTS); do
-            STATE=$(gcloud workstations describe "${{ inputs.workstation_name }}" \
-              --cluster="${{ steps.fetch_config.outputs.cluster }}" \
-              --config="${{ steps.fetch_config.outputs.config_id }}" \
-              --region="${{ steps.fetch_config.outputs.region }}" \
-              --project="${{ secrets.GCP_PROJECT_ID }}" \
-              --format="value(state)" 2>/dev/null || echo "UNKNOWN")
-
-            echo "Attempt $i/$MAX_ATTEMPTS – state: $STATE"
-
-            if [[ "$STATE" == *"RUNNING"* ]]; then
-              echo "final_state=RUNNING" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            sleep $SLEEP
-          done
-
-          echo "final_state=PROVISIONING" >> $GITHUB_OUTPUT
-
-      # ── 7. Fetch final workstation URL ────────────────────────────────────
-      - name: Fetch Final Workstation URL
+      # ── 6. Verify workstation exists and get URL ─────────────────────────
+      - name: Verify Workstation and Get URL
         id: final_url
         run: |
-          HOST=$(gcloud workstations describe "${{ inputs.workstation_name }}" \
+          set -euo pipefail
+
+          WS_JSON=$(gcloud workstations describe "${{ inputs.workstation_name }}" \
             --cluster="${{ steps.fetch_config.outputs.cluster }}" \
             --config="${{ steps.fetch_config.outputs.config_id }}" \
             --region="${{ steps.fetch_config.outputs.region }}" \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --format="value(host)" 2>/dev/null || echo "")
+            --format=json 2>/dev/null || echo "{}")
+
+          HOST=$(echo "$WS_JSON" | jq -r '.host // ""')
+          STATE=$(echo "$WS_JSON" | jq -r '.state // "STOPPED"' | sed 's/STATE_//')
 
           if [ -n "$HOST" ]; then
             echo "ws_url=https://$HOST" >> $GITHUB_OUTPUT
           else
             echo "ws_url=" >> $GITHUB_OUTPUT
           fi
+
+          echo "ws_state=$STATE" >> $GITHUB_OUTPUT
+          echo "Workstation exists with state: $STATE"
+          echo "URL: https://$HOST" 
 
       # ── 8. Upsert Port workstation entity ─────────────────────────────────
       - name: Create Port Workstation Entity
@@ -212,13 +195,17 @@ jobs:
           title: ${{ inputs.workstation_name }}
           blueprint: gcp_workstation
           runId: ${{ inputs.port_run_id }}
+          relations: |
+            {
+              "workstation_config": "${{ steps.fetch_config.outputs.entity_id }}"
+            }
           properties: |
             {
               "workstation_id": "${{ inputs.workstation_name }}",
               "cluster": "${{ steps.fetch_config.outputs.cluster }}",
               "region": "${{ steps.fetch_config.outputs.region }}",
               "config": "${{ steps.fetch_config.outputs.config_id }}",
-              "status": "${{ steps.wait_running.outputs.final_state }}",
+              "status": "${{ steps.final_url.outputs.ws_state }}",
               "workstation_url": "${{ steps.final_url.outputs.ws_url }}",
               "created_by": "${{ inputs.triggered_by }}",
               "project_id": "${{ secrets.GCP_PROJECT_ID }}"
@@ -236,7 +223,7 @@ jobs:
           runId: ${{ inputs.port_run_id }}
           status: "SUCCESS"
           logMessage: |
-            ✅ Workstation '${{ inputs.workstation_name }}' is ${{ steps.wait_running.outputs.final_state }}.
+            ✅ Workstation '${{ inputs.workstation_name }}' created successfully.
             Config: ${{ steps.fetch_config.outputs.config_id }} | Team: ${{ inputs.team }}
             URL: ${{ steps.final_url.outputs.ws_url }}
 
