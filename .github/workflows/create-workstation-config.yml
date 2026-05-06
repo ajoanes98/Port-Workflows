@@ -174,7 +174,7 @@ jobs:
         id: naming
         run: |
           DISPLAY="${{ inputs.display_name }}"
-          if [ -z "$DISPLAY" ]; then
+          if [ -z "$DISPLAY" ] || [ "$DISPLAY" = "null" ]; then
             DISPLAY="${{ inputs.config_id }}"
           fi
           echo "title=${DISPLAY} (${{ inputs.team }})" >> $GITHUB_OUTPUT
