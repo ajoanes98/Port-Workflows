@@ -1,0 +1,466 @@
+name: Create Coder Template
+
+on:
+  workflow_dispatch:
+    inputs:
+      template_name:
+        description: "Unique template identifier"
+        required: true
+        type: string
+      display_name:
+        description: "Human-readable display name"
+        required: true
+        type: string
+      description:
+        description: "Template description"
+        required: false
+        default: ""
+        type: string
+      team:
+        description: "Target team name"
+        required: true
+        type: string
+      tools:
+        description: "JSON array of tools to install"
+        required: false
+        default: "[]"
+        type: string
+      node_version:
+        description: "Node.js version"
+        required: false
+        default: "20"
+        type: string
+      python_version:
+        description: "Python version"
+        required: false
+        default: "3.12"
+        type: string
+      namespace:
+        description: "Kubernetes namespace"
+        required: true
+        type: string
+      cpu_request:
+        description: "CPU request per workspace"
+        required: false
+        default: "2"
+        type: string
+      memory_request:
+        description: "Memory request per workspace"
+        required: false
+        default: "4Gi"
+        type: string
+      disk_size_gb:
+        description: "Persistent home disk size in GB"
+        required: false
+        default: "50"
+        type: string
+      ttl_days:
+        description: "Max TTL in days (1-7)"
+        required: false
+        default: "1"
+        type: string
+      port_run_id:
+        description: "Port action run ID"
+        required: true
+        type: string
+      triggered_by:
+        description: "Email of triggering user"
+        required: false
+        type: string
+
+jobs:
+  create-coder-template:
+    name: Generate & Push Coder Template
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # ── 1. Notify Port ────────────────────────────────────────────────────
+      - name: Notify Port - In Progress
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "Starting Coder template creation for '${{ inputs.template_name }}'..."
+
+      # ── 2. Parse tools ────────────────────────────────────────────────────
+      - name: Parse tools
+        id: tools
+        if: always()
+        shell: python3 {0}
+        run: |
+          import json, os
+
+          raw = '${{ inputs.tools }}'.strip()
+          try:
+              parsed = json.loads(raw)
+              if not isinstance(parsed, list):
+                  parsed = []
+          except Exception:
+              parsed = []
+
+          csv  = ','.join(parsed)
+          jarr = json.dumps(parsed)
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'csv={csv}\n')
+              f.write(f'json={jarr}\n')
+
+          print(f'Tools CSV : {csv}')
+          print(f'Tools JSON: {jarr}')
+
+      # ── 3. Authenticate to GCP ────────────────────────────────────────────
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      # ── 4. Install Coder CLI ──────────────────────────────────────────────
+      - name: Install Coder CLI
+        run: |
+          curl -fsSL https://coder.com/install.sh | sh
+          coder version
+
+      # ── 5. Ensure Kubernetes namespace exists ─────────────────────────────
+      - name: Ensure Kubernetes namespace exists
+        run: |
+          NAMESPACE="${{ inputs.namespace }}"
+          gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER_NAME }}" \
+            --region="${{ secrets.GKE_REGION }}" \
+            --project="${{ secrets.GCP_PROJECT_ID }}"
+
+          if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
+            echo "Namespace '$NAMESPACE' already exists."
+          else
+            echo "Creating namespace '$NAMESPACE'..."
+            kubectl create namespace "$NAMESPACE"
+            kubectl label namespace "$NAMESPACE" \
+              managed-by=port \
+              team="${{ inputs.team }}"
+            echo "Namespace '$NAMESPACE' created."
+          fi
+
+      # ── 6. Generate Terraform template ────────────────────────────────────
+      - name: Generate Coder Terraform Template
+        id: generate
+        run: |
+          set -euo pipefail
+          TOOLS="${{ steps.tools.outputs.csv }}"
+          NODE_VER="${{ inputs.node_version }}"
+          PY_VER="${{ inputs.python_version }}"
+          TTL_SECS=$(( ${{ inputs.ttl_days }} * 86400 ))
+
+          mkdir -p template
+
+          # ── main.tf ──────────────────────────────────────────────────────
+          cat > template/main.tf << TERRAFORM
+          terraform {
+            required_providers {
+              coder = {
+                source  = "coder/coder"
+                version = "~> 0.11"
+              }
+              kubernetes = {
+                source  = "hashicorp/kubernetes"
+                version = "~> 2.22"
+              }
+            }
+          }
+
+          provider "coder" {}
+
+          provider "kubernetes" {
+            config_path = null
+          }
+
+          data "coder_workspace" "me" {}
+          data "coder_workspace_owner" "me" {}
+
+          resource "coder_agent" "main" {
+            arch = "amd64"
+            os   = "linux"
+            startup_script = <<-EOT
+              #!/bin/bash
+              set -e
+              echo "Workspace started for \${data.coder_workspace_owner.me.name}"
+            EOT
+          }
+
+          resource "kubernetes_persistent_volume_claim" "home" {
+            metadata {
+              name      = "coder-\${data.coder_workspace.me.id}-home"
+              namespace = "${{ inputs.namespace }}"
+            }
+            spec {
+              access_modes = ["ReadWriteOnce"]
+              resources {
+                requests = {
+                  storage = "${{ inputs.disk_size_gb }}Gi"
+                }
+              }
+            }
+          }
+
+          resource "kubernetes_pod" "main" {
+            count = data.coder_workspace.me.start_count
+            metadata {
+              name      = "coder-\${data.coder_workspace.me.id}"
+              namespace = "${{ inputs.namespace }}"
+              labels = {
+                "app"                    = "coder"
+                "com.coder.workspace.id" = data.coder_workspace.me.id
+                "team"                   = "${{ inputs.team }}"
+                "managed-by"             = "port"
+              }
+            }
+            spec {
+              container {
+                name    = "workspace"
+                image   = "ubuntu:22.04"
+                command = ["/bin/bash", "-c", coder_agent.main.init_script]
+                resources {
+                  requests = {
+                    cpu    = "${{ inputs.cpu_request }}"
+                    memory = "${{ inputs.memory_request }}"
+                  }
+                  limits = {
+                    cpu    = "${{ inputs.cpu_request }}"
+                    memory = "${{ inputs.memory_request }}"
+                  }
+                }
+                env {
+                  name  = "CODER_AGENT_TOKEN"
+                  value = coder_agent.main.token
+                }
+                volume_mount {
+                  mount_path = "/home/coder"
+                  name       = "home"
+                }
+              }
+              volume {
+                name = "home"
+                persistent_volume_claim {
+                  claim_name = kubernetes_persistent_volume_claim.home.metadata[0].name
+                }
+              }
+            }
+          }
+
+          resource "coder_app" "code-server" {
+            agent_id     = coder_agent.main.id
+            slug         = "code-server"
+            display_name = "VS Code"
+            url          = "http://localhost:8080/?folder=/home/coder"
+            icon         = "/icon/code.svg"
+            subdomain    = false
+            share        = "owner"
+          }
+          TERRAFORM
+
+          # ── startup.sh — tool installation ───────────────────────────────
+          cat > template/startup.sh << 'STARTUP'
+          #!/bin/bash
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update && apt-get install -y --no-install-recommends \
+            curl wget ca-certificates gnupg lsb-release unzip zip \
+            build-essential software-properties-common apt-transport-https \
+            && rm -rf /var/lib/apt/lists/*
+          STARTUP
+
+          if echo "$TOOLS" | grep -q "git-github-cli"; then
+            cat >> template/startup.sh << 'BLOCK'
+          apt-get update && apt-get install -y --no-install-recommends git && \
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | tee /etc/apt/sources.list.d/github-cli.list && \
+            apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
+          BLOCK
+          fi
+
+          if echo "$TOOLS" | grep -q "nodejs"; then
+            echo "curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*" >> template/startup.sh
+          fi
+
+          if echo "$TOOLS" | grep -q "python3"; then
+            echo "add-apt-repository ppa:deadsnakes/ppa -y && apt-get update && apt-get install -y python${PY_VER} python${PY_VER}-venv python${PY_VER}-dev python3-pip && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PY_VER} 1 && rm -rf /var/lib/apt/lists/*" >> template/startup.sh
+          fi
+
+          if echo "$TOOLS" | grep -q "java17"; then
+            cat >> template/startup.sh << 'BLOCK'
+          apt-get update && apt-get install -y wget apt-transport-https && \
+            mkdir -p /etc/apt/keyrings && \
+            wget -O - https://packages.adoptium.net/artifactory/api/gpg/key/public | tee /etc/apt/keyrings/adoptium.asc && \
+            echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \
+              | tee /etc/apt/sources.list.d/adoptium.list && \
+            apt-get update && apt-get install -y temurin-17-jdk && rm -rf /var/lib/apt/lists/*
+          BLOCK
+          fi
+
+          if echo "$TOOLS" | grep -q "kubectl"; then
+            cat >> template/startup.sh << 'BLOCK'
+          curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key \
+            | gpg --dearmor -o /usr/share/keyrings/kubernetes-apt-keyring.gpg && \
+            echo "deb [signed-by=/usr/share/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /" \
+              | tee /etc/apt/sources.list.d/kubernetes.list && \
+            apt-get update && apt-get install -y kubectl && rm -rf /var/lib/apt/lists/*
+          BLOCK
+          fi
+
+          if echo "$TOOLS" | grep -q "terraform"; then
+            cat >> template/startup.sh << 'BLOCK'
+          wget -O- https://apt.releases.hashicorp.com/gpg \
+            | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
+            echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+              | tee /etc/apt/sources.list.d/hashicorp.list && \
+            apt-get update && apt-get install -y terraform && rm -rf /var/lib/apt/lists/*
+          BLOCK
+          fi
+
+          if echo "$TOOLS" | grep -q "gcloud-cli"; then
+            cat >> template/startup.sh << 'BLOCK'
+          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+            | tee /etc/apt/sources.list.d/google-cloud-sdk.list && \
+            curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+              | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
+            apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*
+          BLOCK
+          fi
+
+          if echo "$TOOLS" | grep -q "vscode-server"; then
+            echo "curl -fsSL https://code-server.dev/install.sh | sh && code-server --bind-addr 0.0.0.0:8080 &" >> template/startup.sh
+          fi
+
+          if echo "$TOOLS" | grep -q "docker"; then
+            cat >> template/startup.sh << 'BLOCK'
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+              | tee /etc/apt/sources.list.d/docker.list && \
+            apt-get update && apt-get install -y docker-ce-cli docker-buildx-plugin && rm -rf /var/lib/apt/lists/*
+          BLOCK
+          fi
+
+          chmod +x template/startup.sh
+          echo "=== Generated main.tf ==="
+          cat template/main.tf
+          echo "=== Generated startup.sh ==="
+          cat template/startup.sh
+
+      # ── 7. Push template to Coder ─────────────────────────────────────────
+      - name: Push Template to Coder
+        id: push_template
+        env:
+          CODER_URL: ${{ secrets.CODER_URL }}
+          CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TTL_SECS=$(( ${{ inputs.ttl_days }} * 86400 ))
+          DISPLAY="${{ inputs.display_name }}"
+          DESC="${{ inputs.description }}"
+
+          # Check if template already exists
+          if coder templates show "${{ inputs.template_name }}" 2>/dev/null; then
+            echo "Template exists — pushing new version..."
+            coder templates push "${{ inputs.template_name }}" \
+              --directory=template \
+              --name="${{ inputs.template_name }}-v${GITHUB_RUN_NUMBER}" \
+              --yes
+          else
+            echo "Creating new template '${{ inputs.template_name }}'..."
+            coder templates create "${{ inputs.template_name }}" \
+              --directory=template \
+              --display-name="$DISPLAY" \
+              --description="$DESC" \
+              --default-ttl="${TTL_SECS}s" \
+              --yes
+          fi
+
+          # Get template URL
+          TEMPLATE_URL="${{ secrets.CODER_URL }}/templates/${{ inputs.template_name }}"
+          echo "template_url=$TEMPLATE_URL" >> $GITHUB_OUTPUT
+          echo "Template available at: $TEMPLATE_URL"
+
+      # ── 8. Create Port entity ─────────────────────────────────────────────
+      - name: Create Port Template Entity
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.template_name }}
+          title: ${{ inputs.display_name }}
+          blueprint: coder_template
+          runId: ${{ inputs.port_run_id }}
+          properties: |-
+            {
+              "template_name": "${{ inputs.template_name }}",
+              "display_name": "${{ inputs.display_name }}",
+              "description": "${{ inputs.description }}",
+              "tools": ${{ steps.tools.outputs.json }},
+              "cpu_request": "${{ inputs.cpu_request }}",
+              "memory_request": "${{ inputs.memory_request }}",
+              "disk_size_gb": ${{ inputs.disk_size_gb }},
+              "namespace": "${{ inputs.namespace }}",
+              "ttl_days": ${{ inputs.ttl_days }},
+              "team": "${{ inputs.team }}",
+              "coder_url": "${{ steps.push_template.outputs.template_url }}",
+              "status": "READY",
+              "created_by": "${{ inputs.triggered_by }}"
+            }
+
+      # ── 9. Notify success ─────────────────────────────────────────────────
+      - name: Notify Port - Success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: "SUCCESS"
+          logMessage: "✅ Coder template '${{ inputs.display_name }}' created. URL: ${{ steps.push_template.outputs.template_url }}"
+
+      # ── 10. Notify failure ────────────────────────────────────────────────
+      - name: Mark Entity Failed
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.template_name }}
+          blueprint: coder_template
+          runId: ${{ inputs.port_run_id }}
+          properties: |-
+            {
+              "template_name": "${{ inputs.template_name }}",
+              "tools": ${{ steps.tools.outputs.json }},
+              "status": "FAILED"
+            }
+
+      - name: Notify Port - Failure
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: "FAILURE"
+          logMessage: "❌ Failed to create Coder template '${{ inputs.template_name }}'. Check Actions logs."
