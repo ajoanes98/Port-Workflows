@@ -162,6 +162,7 @@ jobs:
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"container_image={container_image}\n")
+              f.write(f"entity_id={entity_id}\n")
 
       # ── 4. Convert timeouts ───────────────────────────────────────────────
       - name: Compute timeout values
@@ -181,32 +182,14 @@ jobs:
 
           if gcloud workstations clusters describe "$CLUSTER" \
               --region="$REGION" \
-              --project="$PROJECT" \
-              --format="value(name)" 2>/dev/null; then
+              --project="$PROJECT" 2>/dev/null; then
             echo "Cluster '$CLUSTER' already exists — skipping creation."
           else
-            echo "Cluster '$CLUSTER' not found — creating (this may take a few minutes)..."
+            echo "Cluster '$CLUSTER' not found — creating (this may take 5-10 minutes)..."
             gcloud workstations clusters create "$CLUSTER" \
               --region="$REGION" \
-              --project="$PROJECT" \
-              --async
-            echo "Waiting for cluster '$CLUSTER' to be ready..."
-            for i in $(seq 1 30); do
-              STATE=$(gcloud workstations clusters describe "$CLUSTER" \
-                --region="$REGION" \
-                --project="$PROJECT" \
-                --format="value(state)" 2>/dev/null || echo "UNKNOWN")
-              echo "Attempt $i/30 — cluster state: $STATE"
-              if [ "$STATE" = "STATE_RUNNING" ] || [ "$STATE" = "RUNNING" ]; then
-                echo "Cluster '$CLUSTER' is ready."
-                break
-              fi
-              if [ "$i" = "30" ]; then
-                echo "::error::Cluster '$CLUSTER' did not reach RUNNING state within timeout."
-                exit 1
-              fi
-              sleep 20
-            done
+              --project="$PROJECT"
+            echo "Cluster '$CLUSTER' created successfully."
           fi
 
       # ── 6. Create Workstation Config via gcloud ───────────────────────────
@@ -274,7 +257,7 @@ jobs:
           runId: ${{ inputs.port_run_id }}
           relations: |
             {
-              "dockerfile": "${{ inputs.dockerfile_entity }}"
+              "dockerfile": "${{ steps.fetch_dockerfile.outputs.entity_id }}"
             }
           properties: |
             {
