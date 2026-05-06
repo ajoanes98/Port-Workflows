@@ -7,6 +7,11 @@ on:
         description: "Workstation config identifier"
         required: true
         type: string
+      display_name:
+        description: "Human-readable display name for the config"
+        required: false
+        default: ""
+        type: string
       dockerfile_entity:
         description: "Port entity identifier of the source Dockerfile"
         required: true
@@ -252,7 +257,7 @@ jobs:
           baseUrl: https://api.getport.io
           operation: UPSERT
           identifier: ${{ inputs.config_id }}
-          title: "${{ inputs.config_id }} (${{ inputs.team }})"
+          title: "${{ inputs.display_name != '' && inputs.display_name || inputs.config_id }} (${{ inputs.team }})"
           blueprint: gcp_workstation_config
           runId: ${{ inputs.port_run_id }}
           relations: |
