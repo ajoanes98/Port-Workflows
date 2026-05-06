@@ -170,6 +170,15 @@ jobs:
               f.write(f"entity_id={entity_id}\n")
 
       # ── 4. Convert timeouts ───────────────────────────────────────────────
+      - name: Resolve display name
+        id: naming
+        run: |
+          DISPLAY="${{ inputs.display_name }}"
+          if [ -z "$DISPLAY" ]; then
+            DISPLAY="${{ inputs.config_id }}"
+          fi
+          echo "title=${DISPLAY} (${{ inputs.team }})" >> $GITHUB_OUTPUT
+
       - name: Compute timeout values
         id: timeouts
         run: |
@@ -258,7 +267,7 @@ jobs:
           baseUrl: https://api.getport.io
           operation: UPSERT
           identifier: ${{ inputs.config_id }}
-          title: "${{ inputs.display_name != '' && inputs.display_name || inputs.config_id }} (${{ inputs.team }})"
+          title: "${{ steps.naming.outputs.title }}"
           blueprint: gcp_workstation_config
           runId: ${{ inputs.port_run_id }}
           relations: |
