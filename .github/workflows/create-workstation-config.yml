@@ -234,7 +234,8 @@ jobs:
           fi
 
           # Labels for team ownership and traceability
-          CMD="$CMD --labels=team=${{ inputs.team }},managed-by=port,created-by=self-service"
+          TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
+          CMD="$CMD --labels=team=${TEAM_LABEL},managed-by=port,created-by=self-service"
 
           # Persistent home disk
           CMD="$CMD --pd-disk-type=${{ inputs.persistent_disk_type }} \
