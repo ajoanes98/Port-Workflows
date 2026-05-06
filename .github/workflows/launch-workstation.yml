@@ -126,12 +126,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
+          OWNER_LABEL=$(echo "${{ inputs.triggered_by }}" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]@._-' | cut -c1-63)
+
           gcloud workstations create "${{ inputs.workstation_name }}" \
             --cluster="${{ steps.fetch_config.outputs.cluster }}" \
             --config="${{ steps.fetch_config.outputs.config_id }}" \
             --region="${{ steps.fetch_config.outputs.region }}" \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --labels="team=${{ inputs.team }},created-by=port,owner=${{ inputs.triggered_by }}" \
+            --labels="team=${TEAM_LABEL},created-by=port,owner=${OWNER_LABEL}" \
             --format=json \
             --quiet | tee /tmp/ws_output.json
 
