@@ -19,11 +19,6 @@ on:
         description: "Team name (for audit/labelling)"
         required: true
         type: string
-      ttl_hours:
-        description: "Time to live in days (workstation stops after this duration, max 7 days)"
-        required: false
-        default: "1"
-        type: string
       port_run_id:
         description: "Port action run ID"
         required: true
@@ -136,11 +131,9 @@ jobs:
           set -euo pipefail
 
           DISPLAY_NAME="${{ inputs.workstation_display_name }}"
-          if [ -z "$DISPLAY_NAME" ]; then
+          if [ -z "$DISPLAY_NAME" ] || [ "$DISPLAY_NAME" = "null" ]; then
             DISPLAY_NAME="${{ inputs.workstation_name }}"
           fi
-
-          TTL_SECS=$(( ${{ inputs.ttl_hours }} * 86400 ))
 
           gcloud workstations create "${{ inputs.workstation_name }}" \
             --cluster="${{ steps.fetch_config.outputs.cluster }}" \
@@ -148,8 +141,7 @@ jobs:
             --region="${{ steps.fetch_config.outputs.region }}" \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
             --display-name="$DISPLAY_NAME" \
-            --running-timeout=${TTL_SECS} \
-            --labels="team=${{ inputs.team }},created-by=port,owner=${{ inputs.triggered_by }}" \
+            --labels="team=${{ inputs.team }},created-by=port,owner=${{ inputs.triggered_by }},ttl-days=${{ inputs.ttl_hours }}" \
             --format=json \
             --quiet | tee /tmp/ws_output.json
 
