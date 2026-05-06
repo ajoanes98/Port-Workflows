@@ -129,14 +129,25 @@ jobs:
           TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
           OWNER_LABEL=$(echo "${{ inputs.triggered_by }}" | tr '[:upper:]' '[:lower:]' | tr '@.' '-' | tr -cd '[:alnum:]-' | cut -c1-63)
 
-          gcloud workstations create "${{ inputs.workstation_name }}" \
-            --cluster="${{ steps.fetch_config.outputs.cluster }}" \
-            --config="${{ steps.fetch_config.outputs.config_id }}" \
-            --region="${{ steps.fetch_config.outputs.region }}" \
-            --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --labels="team=${TEAM_LABEL},created-by=port,owner=${OWNER_LABEL}" \
-            --format=json \
-            --quiet | tee /tmp/ws_output.json
+          # Check if workstation already exists
+          if gcloud workstations describe "${{ inputs.workstation_name }}" \
+              --cluster="${{ steps.fetch_config.outputs.cluster }}" \
+              --config="${{ steps.fetch_config.outputs.config_id }}" \
+              --region="${{ steps.fetch_config.outputs.region }}" \
+              --project="${{ secrets.GCP_PROJECT_ID }}" \
+              --format=json 2>/dev/null | tee /tmp/ws_output.json; then
+            echo "Workstation '${{ inputs.workstation_name }}' already exists — skipping creation."
+          else
+            echo "Creating workstation '${{ inputs.workstation_name }}'..."
+            gcloud workstations create "${{ inputs.workstation_name }}" \
+              --cluster="${{ steps.fetch_config.outputs.cluster }}" \
+              --config="${{ steps.fetch_config.outputs.config_id }}" \
+              --region="${{ steps.fetch_config.outputs.region }}" \
+              --project="${{ secrets.GCP_PROJECT_ID }}" \
+              --labels="team=${TEAM_LABEL},created-by=port,owner=${OWNER_LABEL}" \
+              --format=json \
+              --quiet | tee /tmp/ws_output.json
+          fi
 
           WS_HOST=$(jq -r '.host // ""' /tmp/ws_output.json)
           if [ -n "$WS_HOST" ]; then
