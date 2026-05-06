@@ -74,7 +74,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
 
     steps:
       # ── 1. Notify Port ────────────────────────────────────────────────────
@@ -114,42 +113,11 @@ jobs:
           print(f'Tools CSV : {csv}')
           print(f'Tools JSON: {jarr}')
 
-      # ── 3. Authenticate to GCP ────────────────────────────────────────────
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      - name: Set up gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-
       # ── 4. Install Coder CLI ──────────────────────────────────────────────
       - name: Install Coder CLI
         run: |
           curl -fsSL https://coder.com/install.sh | sh
           coder version
-
-      # ── 5. Ensure Kubernetes namespace exists ─────────────────────────────
-      - name: Ensure Kubernetes namespace exists
-        run: |
-          NAMESPACE="${{ inputs.namespace }}"
-          gcloud container clusters get-credentials "${{ secrets.GKE_CLUSTER_NAME }}" \
-            --region="${{ secrets.GKE_REGION }}" \
-            --project="${{ secrets.GCP_PROJECT_ID }}"
-
-          if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
-            echo "Namespace '$NAMESPACE' already exists."
-          else
-            echo "Creating namespace '$NAMESPACE'..."
-            kubectl create namespace "$NAMESPACE"
-            kubectl label namespace "$NAMESPACE" \
-              managed-by=port \
-              team="${{ inputs.team }}"
-            echo "Namespace '$NAMESPACE' created."
-          fi
-
-      # ── 6. Generate Terraform template ────────────────────────────────────
       - name: Generate Coder Terraform Template
         id: generate
         run: |
@@ -161,7 +129,7 @@ jobs:
 
           mkdir -p template
 
-          # ── main.tf ──────────────────────────────────────────────────────
+          # ── main.tf — Docker provider (works with minikube/local Docker) ─
           cat > template/main.tf << TERRAFORM
           terraform {
             required_providers {
@@ -169,90 +137,73 @@ jobs:
                 source  = "coder/coder"
                 version = "~> 0.11"
               }
-              kubernetes = {
-                source  = "hashicorp/kubernetes"
-                version = "~> 2.22"
+              docker = {
+                source  = "kreuzwerker/docker"
+                version = "~> 3.0"
               }
             }
           }
 
           provider "coder" {}
-
-          provider "kubernetes" {
-            config_path = null
-          }
+          provider "docker" {}
 
           data "coder_workspace" "me" {}
           data "coder_workspace_owner" "me" {}
 
           resource "coder_agent" "main" {
-            arch = "amd64"
-            os   = "linux"
+            arch           = "amd64"
+            os             = "linux"
             startup_script = <<-EOT
               #!/bin/bash
               set -e
               echo "Workspace started for \${data.coder_workspace_owner.me.name}"
+              if [ -f /home/coder/startup.sh ]; then
+                bash /home/coder/startup.sh
+              fi
             EOT
           }
 
-          resource "kubernetes_persistent_volume_claim" "home" {
-            metadata {
-              name      = "coder-\${data.coder_workspace.me.id}-home"
-              namespace = "${{ inputs.namespace }}"
-            }
-            spec {
-              access_modes = ["ReadWriteOnce"]
-              resources {
-                requests = {
-                  storage = "${{ inputs.disk_size_gb }}Gi"
-                }
-              }
-            }
+          resource "docker_volume" "home" {
+            name = "coder-\${data.coder_workspace.me.id}-home"
           }
 
-          resource "kubernetes_pod" "main" {
-            count = data.coder_workspace.me.start_count
-            metadata {
-              name      = "coder-\${data.coder_workspace.me.id}"
-              namespace = "${{ inputs.namespace }}"
-              labels = {
-                "app"                    = "coder"
-                "com.coder.workspace.id" = data.coder_workspace.me.id
-                "team"                   = "${{ inputs.team }}"
-                "managed-by"             = "port"
-              }
+          resource "docker_image" "workspace" {
+            name = "codercom/enterprise-base:ubuntu"
+            keep_locally = true
+          }
+
+          resource "docker_container" "workspace" {
+            count   = data.coder_workspace.me.start_count
+            image   = docker_image.workspace.image_id
+            name    = "coder-\${data.coder_workspace_owner.me.name}-\${data.coder_workspace.me.name}"
+            command = ["sh", "-c", coder_agent.main.init_script]
+
+            env = [
+              "CODER_AGENT_TOKEN=\${coder_agent.main.token}"
+            ]
+
+            labels {
+              label = "team"
+              value = "${{ inputs.team }}"
             }
-            spec {
-              container {
-                name    = "workspace"
-                image   = "ubuntu:22.04"
-                command = ["/bin/bash", "-c", coder_agent.main.init_script]
-                resources {
-                  requests = {
-                    cpu    = "${{ inputs.cpu_request }}"
-                    memory = "${{ inputs.memory_request }}"
-                  }
-                  limits = {
-                    cpu    = "${{ inputs.cpu_request }}"
-                    memory = "${{ inputs.memory_request }}"
-                  }
-                }
-                env {
-                  name  = "CODER_AGENT_TOKEN"
-                  value = coder_agent.main.token
-                }
-                volume_mount {
-                  mount_path = "/home/coder"
-                  name       = "home"
-                }
-              }
-              volume {
-                name = "home"
-                persistent_volume_claim {
-                  claim_name = kubernetes_persistent_volume_claim.home.metadata[0].name
-                }
-              }
+            labels {
+              label = "managed-by"
+              value = "port"
             }
+
+            host {
+              host = "host.docker.internal"
+              ip   = "host-gateway"
+            }
+
+            volumes {
+              container_path = "/home/coder"
+              volume_name    = docker_volume.home.name
+              read_only      = false
+            }
+
+            memory = tonumber(replace("${{ inputs.memory_request }}", "Gi", "")) * 1024
+            cpu_shares = tonumber("${{ inputs.cpu_request }}") * 256
           }
 
           resource "coder_app" "code-server" {
