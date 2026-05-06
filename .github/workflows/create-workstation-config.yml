@@ -1,86 +1,19 @@
-name: Create Workstation Config
+name: Launch Workstation
 
 on:
   workflow_dispatch:
     inputs:
-      config_id:
-        description: "Workstation config identifier"
+      workstation_name:
+        description: "Unique workstation name"
         required: true
         type: string
-      display_name:
-        description: "Human-readable display name for the config"
-        required: false
-        default: ""
-        type: string
-      dockerfile_entity:
-        description: "Port entity identifier of the source Dockerfile"
+      workstation_config_entity:
+        description: "Port entity identifier of the workstation config"
         required: true
         type: string
       team:
-        description: "Target team/role"
+        description: "Team name (for audit/labelling)"
         required: true
-        type: string
-      cluster:
-        description: "Workstation cluster name"
-        required: true
-        type: string
-      region:
-        description: "GCP region"
-        required: true
-        type: string
-      machine_type:
-        description: "GCE machine type"
-        required: true
-        type: string
-      boot_disk_size_gb:
-        description: "Boot disk size in GB"
-        required: false
-        default: "50"
-        type: string
-      persistent_disk_size_gb:
-        description: "Persistent home disk size in GB"
-        required: false
-        default: "100"
-        type: string
-      persistent_disk_type:
-        description: "Persistent disk type"
-        required: false
-        default: "pd-balanced"
-        type: string
-      idle_timeout_seconds:
-        description: "Idle timeout in seconds"
-        required: false
-        default: "1800"
-        type: string
-      running_timeout_hours:
-        description: "Max running timeout in hours"
-        required: false
-        default: "12"
-        type: string
-      disable_public_ip:
-        description: "Disable public IP"
-        required: false
-        default: "true"
-        type: string
-      enable_nested_virtualisation:
-        description: "Enable nested virtualisation"
-        required: false
-        default: "false"
-        type: string
-      enable_shielded_secure_boot:
-        description: "Shielded VM secure boot"
-        required: false
-        default: "false"
-        type: string
-      enable_shielded_vtpm:
-        description: "Shielded VM vTPM"
-        required: false
-        default: "false"
-        type: string
-      max_usable_workstations:
-        description: "Max concurrent workstations"
-        required: false
-        default: "10"
         type: string
       port_run_id:
         description: "Port action run ID"
@@ -92,8 +25,8 @@ on:
         type: string
 
 jobs:
-  create-workstation-config:
-    name: Create GCP Workstation Config
+  launch-workstation:
+    name: Launch GCP Workstation
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -109,7 +42,7 @@ jobs:
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
-          logMessage: "Creating workstation config '${{ inputs.config_id }}' for team '${{ inputs.team }}'..."
+          logMessage: "Resolving workstation config '${{ inputs.workstation_config_entity }}'..."
 
       # ── 2. Authenticate to GCP via Workload Identity Federation ────────────
       - name: Authenticate to Google Cloud
@@ -121,12 +54,12 @@ jobs:
       - name: Set up gcloud CLI
         uses: google-github-actions/setup-gcloud@v2
 
-      # ── 3. Fetch container image URI from Port entity ─────────────────────
-      - name: Fetch Dockerfile entity from Port
-        id: fetch_dockerfile
+      # ── 3. Resolve config properties from Port entity ─────────────────────
+      - name: Fetch Workstation Config entity from Port
+        id: fetch_config
         shell: python3 {0}
         env:
-          ENTITY_ID: ${{ inputs.dockerfile_entity }}
+          ENTITY_ID: ${{ inputs.workstation_config_entity }}
           PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
         run: |
@@ -153,149 +86,135 @@ jobs:
               token = json.loads(r.read())["accessToken"]
 
           req2 = urllib.request.Request(
-              f"{base_url}/blueprints/gcp_dockerfile/entities/{entity_id}",
+              f"{base_url}/blueprints/gcp_workstation_config/entities/{entity_id}",
               headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
           with urllib.request.urlopen(req2) as r:
               data = json.loads(r.read())
 
-          container_image = data["entity"]["properties"].get("registry_path", "")
-          print(f"Resolved container image: {container_image}")
+          props     = data["entity"]["properties"]
+          cluster   = props["cluster"]
+          region    = props["region"]
+          config_id = props["config_id"]
+          status    = props.get("status", "")
 
-          if not container_image:
-              print("::error::Could not resolve registry_path from Dockerfile entity")
+          print(f"Resolved: cluster={cluster} region={region} config_id={config_id} status={status}")
+
+          if status != "READY":
+              print(f"::error::Config status is '{status}' — only READY configs can be used.")
               sys.exit(1)
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"container_image={container_image}\n")
-              f.write(f"entity_id={entity_id}\n")
+              f.write(f"cluster={cluster}\n")
+              f.write(f"region={region}\n")
+              f.write(f"config_id={config_id}\n")
 
-      # ── 4. Convert timeouts ───────────────────────────────────────────────
-      - name: Resolve display name
-        id: naming
-        run: |
-          DISPLAY="${{ inputs.display_name }}"
-          if [ -z "$DISPLAY" ] || [ "$DISPLAY" = "null" ]; then
-            DISPLAY="${{ inputs.config_id }}"
-          fi
-          echo "title=${DISPLAY} (${{ inputs.team }})" >> $GITHUB_OUTPUT
 
-      - name: Compute timeout values
-        id: timeouts
-        run: |
-          IDLE="${{ inputs.idle_timeout_seconds }}"
-          RUNNING_SECS=$(( ${{ inputs.running_timeout_hours }} * 86400 ))
-          echo "idle_timeout=${IDLE}" >> $GITHUB_OUTPUT
-          echo "running_timeout=${RUNNING_SECS}" >> $GITHUB_OUTPUT
+      # ── 4. Notify resolved config ─────────────────────────────────────────
+      - name: Notify Port – Config Resolved
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "Config resolved: ${{ steps.fetch_config.outputs.config_id }} in ${{ steps.fetch_config.outputs.region }}. Provisioning workstation..."
 
-      # ── 5. Ensure Workstation Cluster exists ──────────────────────────────
-      - name: Ensure Workstation Cluster exists
-        run: |
-          CLUSTER="${{ inputs.cluster }}"
-          REGION="${{ inputs.region }}"
-          PROJECT="${{ secrets.GCP_PROJECT_ID }}"
-
-          if gcloud workstations clusters describe "$CLUSTER" \
-              --region="$REGION" \
-              --project="$PROJECT" 2>/dev/null; then
-            echo "Cluster '$CLUSTER' already exists — skipping creation."
-          else
-            echo "Cluster '$CLUSTER' not found — creating (this may take 5-10 minutes)..."
-            gcloud workstations clusters create "$CLUSTER" \
-              --region="$REGION" \
-              --project="$PROJECT"
-            echo "Cluster '$CLUSTER' created successfully."
-          fi
-
-      # ── 6. Create Workstation Config via gcloud ───────────────────────────
-      - name: Create Workstation Config via gcloud
-        id: create_config
+      # ── 5. Create the workstation ─────────────────────────────────────────
+      - name: Create Workstation
+        id: create_ws
         run: |
           set -euo pipefail
 
-          # Base flags
-          CMD="gcloud workstations configs create ${{ inputs.config_id }} \
-            --cluster=${{ inputs.cluster }} \
-            --region=${{ inputs.region }} \
-            --project=${{ secrets.GCP_PROJECT_ID }} \
-            --machine-type=${{ inputs.machine_type }} \
-            --boot-disk-size=${{ inputs.boot_disk_size_gb }} \
-            --idle-timeout=${{ steps.timeouts.outputs.idle_timeout }} \
-            --running-timeout=${{ steps.timeouts.outputs.running_timeout }} \
-            --max-usable-workstations-count=${{ inputs.max_usable_workstations }} \
-            --container-custom-image=${{ steps.fetch_dockerfile.outputs.container_image }}"
-
-          # Public IP
-          if [ "${{ inputs.disable_public_ip }}" = "true" ]; then
-            CMD="$CMD --disable-public-ip-addresses"
-          fi
-
-          # Nested virtualisation (required for Docker-in-Docker)
-          if [ "${{ inputs.enable_nested_virtualisation }}" = "true" ]; then
-            CMD="$CMD --enable-nested-virtualization"
-          fi
-
-          # Shielded VM
-          if [ "${{ inputs.enable_shielded_secure_boot }}" = "true" ]; then
-            CMD="$CMD --shielded-secure-boot"
-          fi
-          if [ "${{ inputs.enable_shielded_vtpm }}" = "true" ]; then
-            CMD="$CMD --shielded-vtpm"
-          fi
-
-          # Labels for team ownership and traceability
           TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
-          CMD="$CMD --labels=team=${TEAM_LABEL},managed-by=port,created-by=self-service"
+          OWNER_LABEL=$(echo "${{ inputs.triggered_by }}" | tr '[:upper:]' '[:lower:]' | tr '@.' '-' | tr -cd '[:alnum:]-' | cut -c1-63)
 
-          # Persistent home disk
-          CMD="$CMD --pd-disk-type=${{ inputs.persistent_disk_type }} \
-            --pd-disk-size=${{ inputs.persistent_disk_size_gb }} \
-            --pd-reclaim-policy=retain"
+          gcloud workstations create "${{ inputs.workstation_name }}" \
+            --cluster="${{ steps.fetch_config.outputs.cluster }}" \
+            --config="${{ steps.fetch_config.outputs.config_id }}" \
+            --region="${{ steps.fetch_config.outputs.region }}" \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --labels="team=${TEAM_LABEL},created-by=port,owner=${OWNER_LABEL}" \
+            --format=json \
+            --quiet | tee /tmp/ws_output.json
 
-          # Execute
-          echo "Running: $CMD"
-          eval "$CMD --format=json" | tee /tmp/config_output.json
+          WS_HOST=$(jq -r '.host // ""' /tmp/ws_output.json)
+          if [ -n "$WS_HOST" ]; then
+            echo "ws_url=https://$WS_HOST" >> $GITHUB_OUTPUT
+          else
+            echo "ws_url=" >> $GITHUB_OUTPUT
+          fi
 
-          CONFIG_NAME=$(jq -r '.name' /tmp/config_output.json)
-          echo "config_name=$CONFIG_NAME" >> $GITHUB_OUTPUT
+      # ── 6. Wait for RUNNING state ─────────────────────────────────────────
+      - name: Wait for Workstation to be RUNNING
+        id: wait_running
+        run: |
+          set -euo pipefail
+          MAX_ATTEMPTS=30
+          SLEEP=10
 
-      # ── 6. Create Port entity ─────────────────────────────────────────────
-      - name: Create Port Workstation Config Entity
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            STATE=$(gcloud workstations describe "${{ inputs.workstation_name }}" \
+              --cluster="${{ steps.fetch_config.outputs.cluster }}" \
+              --config="${{ steps.fetch_config.outputs.config_id }}" \
+              --region="${{ steps.fetch_config.outputs.region }}" \
+              --project="${{ secrets.GCP_PROJECT_ID }}" \
+              --format="value(state)" 2>/dev/null || echo "UNKNOWN")
+
+            echo "Attempt $i/$MAX_ATTEMPTS – state: $STATE"
+
+            if [[ "$STATE" == *"RUNNING"* ]]; then
+              echo "final_state=RUNNING" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            sleep $SLEEP
+          done
+
+          echo "final_state=PROVISIONING" >> $GITHUB_OUTPUT
+
+      # ── 7. Fetch final workstation URL ────────────────────────────────────
+      - name: Fetch Final Workstation URL
+        id: final_url
+        run: |
+          HOST=$(gcloud workstations describe "${{ inputs.workstation_name }}" \
+            --cluster="${{ steps.fetch_config.outputs.cluster }}" \
+            --config="${{ steps.fetch_config.outputs.config_id }}" \
+            --region="${{ steps.fetch_config.outputs.region }}" \
+            --project="${{ secrets.GCP_PROJECT_ID }}" \
+            --format="value(host)" 2>/dev/null || echo "")
+
+          if [ -n "$HOST" ]; then
+            echo "ws_url=https://$HOST" >> $GITHUB_OUTPUT
+          else
+            echo "ws_url=" >> $GITHUB_OUTPUT
+          fi
+
+      # ── 8. Upsert Port workstation entity ─────────────────────────────────
+      - name: Create Port Workstation Entity
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: UPSERT
-          identifier: ${{ inputs.config_id }}
-          title: "${{ steps.naming.outputs.title }}"
-          blueprint: gcp_workstation_config
+          identifier: ${{ inputs.workstation_name }}
+          title: ${{ inputs.workstation_name }}
+          blueprint: gcp_workstation
           runId: ${{ inputs.port_run_id }}
-          relations: |
-            {
-              "dockerfile": "${{ steps.fetch_dockerfile.outputs.entity_id }}"
-            }
           properties: |
             {
-              "config_id": "${{ inputs.config_id }}",
-              "cluster": "${{ inputs.cluster }}",
-              "region": "${{ inputs.region }}",
-              "machine_type": "${{ inputs.machine_type }}",
-              "boot_disk_size_gb": ${{ inputs.boot_disk_size_gb }},
-              "persistent_disk_size_gb": ${{ inputs.persistent_disk_size_gb }},
-              "persistent_disk_type": "${{ inputs.persistent_disk_type }}",
-              "idle_timeout": "${{ steps.timeouts.outputs.idle_timeout }}",
-              "running_timeout": "${{ steps.timeouts.outputs.running_timeout }}",
-              "disable_public_ip": ${{ inputs.disable_public_ip }},
-              "enable_nested_virt": ${{ inputs.enable_nested_virtualisation }},
-              "shielded_secure_boot": ${{ inputs.enable_shielded_secure_boot }},
-              "shielded_vtpm": ${{ inputs.enable_shielded_vtpm }},
-              "container_image": "${{ steps.fetch_dockerfile.outputs.container_image }}",
-              "team": "${{ inputs.team }}",
-              "status": "READY",
-              "created_by": "${{ inputs.triggered_by }}"
+              "workstation_id": "${{ inputs.workstation_name }}",
+              "cluster": "${{ steps.fetch_config.outputs.cluster }}",
+              "region": "${{ steps.fetch_config.outputs.region }}",
+              "config": "${{ steps.fetch_config.outputs.config_id }}",
+              "status": "${{ steps.wait_running.outputs.final_state }}",
+              "workstation_url": "${{ steps.final_url.outputs.ws_url }}",
+              "created_by": "${{ inputs.triggered_by }}",
+              "project_id": "${{ secrets.GCP_PROJECT_ID }}",
+              "idle_timeout": ${{ inputs.ttl_hours }}
             }
 
-      # ── 7. Report success ─────────────────────────────────────────────────
+      # ── 9. Report success ─────────────────────────────────────────────────
       - name: Notify Port – Success
         if: success()
         uses: port-labs/port-github-action@v1
@@ -307,12 +226,11 @@ jobs:
           runId: ${{ inputs.port_run_id }}
           status: "SUCCESS"
           logMessage: |
-            ✅ Workstation config '${{ inputs.config_id }}' created and registered.
-            Team: ${{ inputs.team }} | Machine: ${{ inputs.machine_type }} | Region: ${{ inputs.region }}
-            Container: ${{ steps.fetch_dockerfile.outputs.container_image }}
-            Next step: Use "Launch My Workstation" to spin up a workstation from this config.
+            ✅ Workstation '${{ inputs.workstation_name }}' is ${{ steps.wait_running.outputs.final_state }}.
+            Config: ${{ steps.fetch_config.outputs.config_id }} | Team: ${{ inputs.team }}
+            URL: ${{ steps.final_url.outputs.ws_url }}
 
-      # ── 8. Report failure ─────────────────────────────────────────────────
+      # ── 10. Report failure ────────────────────────────────────────────────
       - name: Notify Port – Failure
         if: failure()
         uses: port-labs/port-github-action@v1
@@ -323,4 +241,4 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: "FAILURE"
-          logMessage: "❌ Failed to create workstation config '${{ inputs.config_id }}'. Check Actions logs."
+          logMessage: "❌ Failed to launch workstation '${{ inputs.workstation_name }}'. Check Actions logs."
