@@ -127,7 +127,7 @@ jobs:
           set -euo pipefail
 
           TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
-          OWNER_LABEL=$(echo "${{ inputs.triggered_by }}" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]@._-' | cut -c1-63)
+          OWNER_LABEL=$(echo "${{ inputs.triggered_by }}" | tr '[:upper:]' '[:lower:]' | tr '@.' '-' | tr -cd '[:alnum:]-' | cut -c1-63)
 
           gcloud workstations create "${{ inputs.workstation_name }}" \
             --cluster="${{ steps.fetch_config.outputs.cluster }}" \
