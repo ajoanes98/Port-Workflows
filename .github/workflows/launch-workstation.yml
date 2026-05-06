@@ -7,10 +7,6 @@ on:
         description: "Unique workstation name"
         required: true
         type: string
-      workstation_display_name:
-        description: "Human-readable display name"
-        required: false
-        type: string
       workstation_config_entity:
         description: "Port entity identifier of the workstation config"
         required: true
@@ -130,18 +126,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          DISPLAY_NAME="${{ inputs.workstation_display_name }}"
-          if [ -z "$DISPLAY_NAME" ] || [ "$DISPLAY_NAME" = "null" ]; then
-            DISPLAY_NAME="${{ inputs.workstation_name }}"
-          fi
-
           gcloud workstations create "${{ inputs.workstation_name }}" \
             --cluster="${{ steps.fetch_config.outputs.cluster }}" \
             --config="${{ steps.fetch_config.outputs.config_id }}" \
             --region="${{ steps.fetch_config.outputs.region }}" \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
-            --display-name="$DISPLAY_NAME" \
-            --labels="team=${{ inputs.team }},created-by=port,owner=${{ inputs.triggered_by }},ttl-days=${{ inputs.ttl_hours }}" \
+            --labels="team=${{ inputs.team }},created-by=port,owner=${{ inputs.triggered_by }}" \
             --format=json \
             --quiet | tee /tmp/ws_output.json
 
