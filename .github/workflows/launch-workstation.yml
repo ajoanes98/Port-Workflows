@@ -19,6 +19,11 @@ on:
         description: "Team name (for audit/labelling)"
         required: true
         type: string
+      ttl_hours:
+        description: "Time to live in days (workstation stops after this duration, max 7 days)"
+        required: false
+        default: "1"
+        type: string
       port_run_id:
         description: "Port action run ID"
         required: true
@@ -34,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      id-token: write  # Required for Workload Identity Federation
 
     steps:
       # ── 1. Notify Port: in progress ──────────────────────────────────────
@@ -46,10 +51,9 @@ jobs:
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
-          status: "IN_PROGRESS"
           logMessage: "Resolving workstation config '${{ inputs.workstation_config_entity }}'..."
 
-      # ── 2. Authenticate to GCP ────────────────────────────────────────────
+      # ── 2. Authenticate to GCP via Workload Identity Federation ────────────
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
@@ -62,40 +66,57 @@ jobs:
       # ── 3. Resolve config properties from Port entity ─────────────────────
       - name: Fetch Workstation Config entity from Port
         id: fetch_config
+        shell: python3 {0}
+        env:
+          ENTITY_ID: ${{ inputs.workstation_config_entity }}
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
         run: |
-          set -euo pipefail
+          import json, os, sys, urllib.request
 
-          # Get Port access token
-          TOKEN=$(curl -s -X POST https://api.getport.io/v1/auth/access_token \
-            -H 'Content-Type: application/json' \
-            -d "{\"clientId\":\"${{ secrets.PORT_CLIENT_ID }}\",\"clientSecret\":\"${{ secrets.PORT_CLIENT_SECRET }}\"}" \
-            | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessToken"])')
+          client_id     = os.environ["PORT_CLIENT_ID"]
+          client_secret = os.environ["PORT_CLIENT_SECRET"]
+          entity_raw    = os.environ["ENTITY_ID"]
+          base_url      = "https://api.getport.io/v1"
 
-          # Fetch the config entity
-          RESPONSE=$(curl -s -X GET \
-            "https://api.getport.io/v1/blueprints/gcp_workstation_config/entities/${{ inputs.workstation_config_entity }}" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: application/json")
+          # Port may pass the full entity object or just the identifier string
+          try:
+              entity_obj = json.loads(entity_raw)
+              entity_id  = entity_obj.get("identifier", entity_raw)
+          except (json.JSONDecodeError, AttributeError):
+              entity_id  = entity_raw.strip()
 
-          echo "Config entity response:"
-          echo "$RESPONSE" | python3 -m json.tool
+          auth_payload = json.dumps({"clientId": client_id, "clientSecret": client_secret}).encode()
+          req = urllib.request.Request(
+              f"{base_url}/auth/access_token",
+              data=auth_payload,
+              headers={"Content-Type": "application/json"})
+          with urllib.request.urlopen(req) as r:
+              token = json.loads(r.read())["accessToken"]
 
-          # Extract fields
-          CLUSTER=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['entity']['properties']['cluster'])")
-          REGION=$(echo "$RESPONSE"  | python3 -c "import sys,json; print(json.load(sys.stdin)['entity']['properties']['region'])")
-          CONFIG_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['entity']['properties']['config_id'])")
-          STATUS=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['entity']['properties']['status'])")
+          req2 = urllib.request.Request(
+              f"{base_url}/blueprints/gcp_workstation_config/entities/{entity_id}",
+              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+          with urllib.request.urlopen(req2) as r:
+              data = json.loads(r.read())
 
-          if [ "$STATUS" != "READY" ]; then
-            echo "::error::Workstation config '${{ inputs.workstation_config_entity }}' has status '$STATUS' — only READY configs can be used."
-            exit 1
-          fi
+          props     = data["entity"]["properties"]
+          cluster   = props["cluster"]
+          region    = props["region"]
+          config_id = props["config_id"]
+          status    = props.get("status", "")
 
-          echo "cluster=$CLUSTER"   >> $GITHUB_OUTPUT
-          echo "region=$REGION"     >> $GITHUB_OUTPUT
-          echo "config_id=$CONFIG_ID" >> $GITHUB_OUTPUT
+          print(f"Resolved: cluster={cluster} region={region} config_id={config_id} status={status}")
 
-          echo "Resolved: cluster=$CLUSTER region=$REGION config_id=$CONFIG_ID"
+          if status != "READY":
+              print(f"::error::Config status is '{status}' — only READY configs can be used.")
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"cluster={cluster}\n")
+              f.write(f"region={region}\n")
+              f.write(f"config_id={config_id}\n")
+
 
       # ── 4. Notify resolved config ─────────────────────────────────────────
       - name: Notify Port – Config Resolved
@@ -119,12 +140,15 @@ jobs:
             DISPLAY_NAME="${{ inputs.workstation_name }}"
           fi
 
+          TTL_SECS=$(( ${{ inputs.ttl_hours }} * 86400 ))
+
           gcloud workstations create "${{ inputs.workstation_name }}" \
             --cluster="${{ steps.fetch_config.outputs.cluster }}" \
             --config="${{ steps.fetch_config.outputs.config_id }}" \
             --region="${{ steps.fetch_config.outputs.region }}" \
             --project="${{ secrets.GCP_PROJECT_ID }}" \
             --display-name="$DISPLAY_NAME" \
+            --running-timeout=${TTL_SECS} \
             --labels="team=${{ inputs.team }},created-by=port,owner=${{ inputs.triggered_by }}" \
             --format=json \
             --quiet | tee /tmp/ws_output.json
@@ -201,7 +225,8 @@ jobs:
               "status": "${{ steps.wait_running.outputs.final_state }}",
               "workstation_url": "${{ steps.final_url.outputs.ws_url }}",
               "created_by": "${{ inputs.triggered_by }}",
-              "project_id": "${{ secrets.GCP_PROJECT_ID }}"
+              "project_id": "${{ secrets.GCP_PROJECT_ID }}",
+              "idle_timeout": ${{ inputs.ttl_hours }}
             }
 
       # ── 9. Report success ─────────────────────────────────────────────────
