@@ -183,7 +183,7 @@ jobs:
         id: timeouts
         run: |
           IDLE="${{ inputs.idle_timeout_seconds }}"
-          RUNNING_SECS=$(( ${{ inputs.running_timeout_hours }} * 3600 ))
+          RUNNING_SECS=$(( ${{ inputs.running_timeout_hours }} * 86400 ))
           echo "idle_timeout=${IDLE}" >> $GITHUB_OUTPUT
           echo "running_timeout=${RUNNING_SECS}" >> $GITHUB_OUTPUT
 
