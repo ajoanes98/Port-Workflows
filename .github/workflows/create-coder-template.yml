@@ -332,8 +332,6 @@ jobs:
             echo "Creating new template '${{ inputs.template_name }}'..."
             coder templates create "${{ inputs.template_name }}" \
               --directory=template \
-              --display-name="$DISPLAY" \
-              --description="$DESC" \
               --default-ttl="${TTL_SECS}s" \
               --yes
           fi
@@ -364,7 +362,7 @@ jobs:
               "cpu_request": "${{ inputs.cpu_request }}",
               "memory_request": "${{ inputs.memory_request }}",
               "disk_size_gb": ${{ inputs.disk_size_gb }},
-              "namespace": "${{ inputs.namespace }}",
+              "namespace": "${{ inputs.namespace || 'docker' }}",
               "ttl_days": ${{ inputs.ttl_days }},
               "team": "${{ inputs.team }}",
               "coder_url": "${{ steps.push_template.outputs.template_url }}",
