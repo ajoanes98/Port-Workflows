@@ -240,7 +240,12 @@ jobs:
           }
           TERRAFORM
 
-          # Copy kubeconfig into template directory so Terraform can find it
+          # Decode and patch kubeconfig — replace localhost with minikube IP
+          echo "${{ secrets.MINIKUBE_KUBECONFIG_B64 }}" | base64 --decode \
+            | sed "s|https://127.0.0.1:[0-9]*|https://${{ secrets.MINIKUBE_IP }}:8443|g" \
+            > /tmp/minikube.kubeconfig
+
+          # Copy patched kubeconfig into template directory so Terraform can find it
           cp /tmp/minikube.kubeconfig template/kubeconfig
 
           # ── startup.sh — tool installation ───────────────────────────────
@@ -337,7 +342,10 @@ jobs:
       # ── 6. Set up kubectl and ensure namespace exists ─────────────────────
       - name: Set up kubectl and ensure namespace exists
         run: |
-          echo "${{ secrets.MINIKUBE_KUBECONFIG_B64 }}" | base64 --decode > /tmp/minikube.kubeconfig
+          # Decode kubeconfig and patch server address to use minikube IP
+          echo "${{ secrets.MINIKUBE_KUBECONFIG_B64 }}" | base64 --decode \
+            | sed "s|https://127.0.0.1:[0-9]*|https://${{ secrets.MINIKUBE_IP }}:8443|g" \
+            > /tmp/minikube.kubeconfig
           export KUBECONFIG=/tmp/minikube.kubeconfig
 
           NAMESPACE="${{ inputs.namespace }}"
