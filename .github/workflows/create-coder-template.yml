@@ -192,7 +192,7 @@ jobs:
               labels = {
                 "app"                    = "coder"
                 "com.coder.workspace.id" = data.coder_workspace.me.id
-                "team"                   = "${{ inputs.team }}"
+                "team"                   = "TEAM_LABEL_PLACEHOLDER"
                 "managed-by"             = "port"
               }
             }
@@ -239,6 +239,12 @@ jobs:
             share        = "owner"
           }
           TERRAFORM
+
+          # Sanitize team name for use as a Kubernetes label
+          TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-_.')
+
+          # Replace team label placeholder in generated main.tf
+          sed -i "s|TEAM_LABEL_PLACEHOLDER|${TEAM_LABEL}|g" template/main.tf
 
           # Copy local minikube kubeconfig into template directory for Terraform
           # Flatten all cert file references to inline base64 to avoid path issues
