@@ -244,7 +244,7 @@ jobs:
           TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-_.')
 
           # Replace team label placeholder in generated main.tf
-          sed -i "s|TEAM_LABEL_PLACEHOLDER|${TEAM_LABEL}|g" template/main.tf
+          sed -i '' "s|TEAM_LABEL_PLACEHOLDER|${TEAM_LABEL}|g" template/main.tf
 
           # Copy local minikube kubeconfig into template directory for Terraform
           # Flatten all cert file references to inline base64 to avoid path issues
