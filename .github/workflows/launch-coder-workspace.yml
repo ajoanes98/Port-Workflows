@@ -27,7 +27,7 @@ on:
 jobs:
   launch-coder-workspace:
     name: Launch Coder Workspace
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       id-token: write
