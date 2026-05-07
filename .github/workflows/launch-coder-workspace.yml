@@ -118,13 +118,11 @@ jobs:
           # Explicitly authenticate the Coder CLI
           coder login "${{ secrets.CODER_URL }}" --token "${{ secrets.CODER_TOKEN }}"
 
-          TTL_SECS=$(( ${{ steps.fetch_template.outputs.ttl_days }} * 86400 ))
           TEMPLATE="${{ steps.fetch_template.outputs.template_name }}"
           WS_NAME="${{ inputs.workspace_name }}"
 
           coder create "$WS_NAME" \
             --template="$TEMPLATE" \
-            --ttl="${TTL_SECS}s" \
             --yes
 
           # Get workspace URL
