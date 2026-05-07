@@ -314,8 +314,12 @@ jobs:
         env:
           CODER_URL: ${{ secrets.CODER_URL }}
           CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
+          CODER_SESSION_TOKEN: ${{ secrets.CODER_TOKEN }}
         run: |
           set -euo pipefail
+
+          # Explicitly authenticate the Coder CLI
+          coder login "${{ secrets.CODER_URL }}" --token "${{ secrets.CODER_TOKEN }}"
 
           TTL_SECS=$(( ${{ inputs.ttl_days }} * 86400 ))
           DISPLAY="${{ inputs.display_name }}"
