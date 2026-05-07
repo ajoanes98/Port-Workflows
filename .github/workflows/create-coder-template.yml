@@ -71,7 +71,7 @@ on:
 jobs:
   create-coder-template:
     name: Generate & Push Coder Template
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
 
@@ -240,13 +240,8 @@ jobs:
           }
           TERRAFORM
 
-          # Decode and patch kubeconfig — replace localhost with minikube IP
-          echo "${{ secrets.MINIKUBE_KUBECONFIG_B64 }}" | base64 --decode \
-            | sed "s|https://127.0.0.1:[0-9]*|https://${{ secrets.MINIKUBE_IP }}:8443|g" \
-            > /tmp/minikube.kubeconfig
-
-          # Copy patched kubeconfig into template directory so Terraform can find it
-          cp /tmp/minikube.kubeconfig template/kubeconfig
+          # Copy local minikube kubeconfig into template directory for Terraform
+          cp "$HOME/.kube/config" template/kubeconfig
 
           # ── startup.sh — tool installation ───────────────────────────────
           cat > template/startup.sh << 'STARTUP'
@@ -342,11 +337,9 @@ jobs:
       # ── 6. Set up kubectl and ensure namespace exists ─────────────────────
       - name: Set up kubectl and ensure namespace exists
         run: |
-          # Decode kubeconfig and patch server address to use minikube IP
-          echo "${{ secrets.MINIKUBE_KUBECONFIG_B64 }}" | base64 --decode \
-            | sed "s|https://127.0.0.1:[0-9]*|https://${{ secrets.MINIKUBE_IP }}:8443|g" \
-            > /tmp/minikube.kubeconfig
-          export KUBECONFIG=/tmp/minikube.kubeconfig
+          # Use local minikube kubeconfig directly (self-hosted runner on Mac)
+          export KUBECONFIG="$HOME/.kube/config"
+          kubectl config use-context minikube
 
           NAMESPACE="${{ inputs.namespace }}"
           if [ -z "$NAMESPACE" ] || [ "$NAMESPACE" = "null" ]; then
