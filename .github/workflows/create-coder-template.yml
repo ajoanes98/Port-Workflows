@@ -241,7 +241,8 @@ jobs:
           TERRAFORM
 
           # Copy local minikube kubeconfig into template directory for Terraform
-          cp "$HOME/.kube/config" template/kubeconfig
+          # Flatten all cert file references to inline base64 to avoid path issues
+          kubectl config view --minify --flatten --context=minikube > template/kubeconfig
 
           # ── startup.sh — tool installation ───────────────────────────────
           cat > template/startup.sh << 'STARTUP'
