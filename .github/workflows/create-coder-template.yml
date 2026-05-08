@@ -113,15 +113,16 @@ jobs:
           curl -fsSL https://coder.com/install.sh | sh
           coder version
 
-      - name: Generate Minimal Coder Template
+      - name: Generate Coder Template with Docker backend
         id: generate
         run: |
           set -euo pipefail
           TOOLS="${{ steps.tools.outputs.csv }}"
+          NODE_VER="${{ inputs.node_version }}"
+          PY_VER="${{ inputs.python_version }}"
           mkdir -p template
 
-          # Minimal main.tf — no Kubernetes or Docker required
-          # Uses a simple echo provider for demo purposes
+          # main.tf — Docker provider using local Docker Desktop socket
           cat > template/main.tf << 'TERRAFORM'
           terraform {
             required_providers {
@@ -129,10 +130,18 @@ jobs:
                 source  = "coder/coder"
                 version = "~> 0.11"
               }
+              docker = {
+                source  = "kreuzwerker/docker"
+                version = "~> 3.0"
+              }
             }
           }
 
           provider "coder" {}
+
+          provider "docker" {
+            host = "unix:///var/run/docker.sock"
+          }
 
           data "coder_workspace" "me" {}
           data "coder_workspace_owner" "me" {}
@@ -140,14 +149,48 @@ jobs:
           resource "coder_agent" "main" {
             arch           = "amd64"
             os             = "linux"
-            startup_script = "echo 'Workspace started'"
+            startup_script = <<-EOT
+              #!/bin/bash
+              set -e
+              # Install code-server if not present
+              if ! command -v code-server &>/dev/null; then
+                curl -fsSL https://code-server.dev/install.sh | sh
+              fi
+              code-server --bind-addr 0.0.0.0:13337 --auth none &
+            EOT
+          }
+
+          resource "docker_volume" "home" {
+            name = "coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}-home"
+          }
+
+          resource "docker_container" "workspace" {
+            count   = data.coder_workspace.me.start_count
+            image   = "codercom/enterprise-base:ubuntu"
+            name    = "coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}"
+            command = ["sh", "-c", coder_agent.main.init_script]
+
+            env = [
+              "CODER_AGENT_TOKEN=${coder_agent.main.token}"
+            ]
+
+            host {
+              host = "host.docker.internal"
+              ip   = "host-gateway"
+            }
+
+            volumes {
+              container_path = "/home/coder"
+              volume_name    = docker_volume.home.name
+              read_only      = false
+            }
           }
 
           resource "coder_app" "code-server" {
             agent_id     = coder_agent.main.id
             slug         = "code-server"
             display_name = "VS Code"
-            url          = "http://localhost:8080/?folder=/home/coder"
+            url          = "http://localhost:13337/?folder=/home/coder"
             icon         = "/icon/code.svg"
             subdomain    = false
             share        = "owner"
