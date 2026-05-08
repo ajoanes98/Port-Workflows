@@ -1,19 +1,64 @@
-name: Launch Coder Workspace
+name: Create Coder Template
 
 on:
   workflow_dispatch:
     inputs:
-      workspace_name:
-        description: "Unique workspace name"
+      template_name:
+        description: "Unique template identifier"
         required: true
         type: string
-      template_entity:
-        description: "Port template entity (JSON or identifier)"
+      display_name:
+        description: "Human-readable display name"
         required: true
+        type: string
+      description:
+        description: "Template description"
+        required: false
+        default: ""
         type: string
       team:
-        description: "Team name"
+        description: "Target team name"
         required: true
+        type: string
+      tools:
+        description: "JSON array of tools to install"
+        required: false
+        default: "[]"
+        type: string
+      node_version:
+        description: "Node.js version"
+        required: false
+        default: "20"
+        type: string
+      python_version:
+        description: "Python version"
+        required: false
+        default: "3.12"
+        type: string
+      namespace:
+        description: "Kubernetes namespace"
+        required: false
+        default: "coder-workspaces"
+        type: string
+      cpu_request:
+        description: "CPU request per workspace"
+        required: false
+        default: "1"
+        type: string
+      memory_request:
+        description: "Memory request per workspace"
+        required: false
+        default: "1Gi"
+        type: string
+      disk_size_gb:
+        description: "Persistent home disk size in GB"
+        required: false
+        default: "10"
+        type: string
+      ttl_days:
+        description: "Max TTL in days (1-7)"
+        required: false
+        default: "1"
         type: string
       port_run_id:
         description: "Port action run ID"
@@ -25,15 +70,13 @@ on:
         type: string
 
 jobs:
-  launch-coder-workspace:
-    name: Launch Coder Workspace
+  create-coder-template:
+    name: Generate & Push Coder Template
     runs-on: self-hosted
     permissions:
       contents: read
-      id-token: write
 
     steps:
-      # ── 1. Notify Port ────────────────────────────────────────────────────
       - name: Notify Port - In Progress
         uses: port-labs/port-github-action@v1
         with:
@@ -42,126 +85,246 @@ jobs:
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
-          logMessage: "Resolving template for workspace '${{ inputs.workspace_name }}'..."
+          logMessage: "Starting Coder template creation for '${{ inputs.template_name }}'..."
 
-      # ── 2. Fetch template entity from Port ────────────────────────────────
-      - name: Fetch Template entity from Port
-        id: fetch_template
+      - name: Parse tools
+        id: tools
+        if: always()
         shell: python3 {0}
-        env:
-          ENTITY_RAW: ${{ inputs.template_entity }}
-          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
-          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
         run: |
-          import json, os, sys, urllib.request
-
-          client_id     = os.environ["PORT_CLIENT_ID"]
-          client_secret = os.environ["PORT_CLIENT_SECRET"]
-          entity_raw    = os.environ["ENTITY_RAW"]
-          base_url      = "https://api.getport.io/v1"
-
-          # Port may pass the full entity object or just the identifier
+          import json, os
+          raw = '${{ inputs.tools }}'.strip()
           try:
-              entity_obj = json.loads(entity_raw)
-              entity_id  = entity_obj.get("identifier", entity_raw)
-          except (json.JSONDecodeError, AttributeError):
-              entity_id  = entity_raw.strip()
+              parsed = json.loads(raw)
+              if not isinstance(parsed, list):
+                  parsed = []
+          except Exception:
+              parsed = []
+          csv  = ','.join(parsed)
+          jarr = json.dumps(parsed)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'csv={csv}\n')
+              f.write(f'json={jarr}\n')
+          print(f'Tools CSV : {csv}')
+          print(f'Tools JSON: {jarr}')
 
-          auth_payload = json.dumps({"clientId": client_id, "clientSecret": client_secret}).encode()
-          req = urllib.request.Request(
-              f"{base_url}/auth/access_token",
-              data=auth_payload,
-              headers={"Content-Type": "application/json"})
-          with urllib.request.urlopen(req) as r:
-              token = json.loads(r.read())["accessToken"]
-
-          req2 = urllib.request.Request(
-              f"{base_url}/blueprints/coder_template/entities/{entity_id}",
-              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-          with urllib.request.urlopen(req2) as r:
-              data = json.loads(r.read())
-
-          props         = data["entity"]["properties"]
-          template_name = props["template_name"]
-          namespace     = props["namespace"]
-          ttl_days      = props.get("ttl_days", 1)
-          status        = props.get("status", "")
-
-          print(f"Resolved: template={template_name} namespace={namespace} ttl_days={ttl_days} status={status}")
-
-          if status != "READY":
-              print(f"::error::Template status is '{status}' — only READY templates can be used.")
-              sys.exit(1)
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              f.write(f"template_name={template_name}\n")
-              f.write(f"namespace={namespace}\n")
-              f.write(f"ttl_days={ttl_days}\n")
-              f.write(f"entity_id={entity_id}\n")
-
-      # ── 3. Install Coder CLI ──────────────────────────────────────────────
       - name: Install Coder CLI
         run: |
           curl -fsSL https://coder.com/install.sh | sh
           coder version
 
-      # ── 4. Create workspace ───────────────────────────────────────────────
-      - name: Create Coder Workspace
-        id: create_workspace
+      - name: Generate Coder Terraform Template
+        id: generate
+        run: |
+          set -euo pipefail
+          TOOLS="${{ steps.tools.outputs.csv }}"
+          NODE_VER="${{ inputs.node_version }}"
+          PY_VER="${{ inputs.python_version }}"
+
+          mkdir -p template
+
+          TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-_.')
+
+          cat > template/main.tf << TERRAFORM
+          terraform {
+            required_providers {
+              coder = {
+                source  = "coder/coder"
+                version = "~> 0.11"
+              }
+              kubernetes = {
+                source  = "hashicorp/kubernetes"
+                version = "~> 2.22"
+              }
+            }
+          }
+
+          provider "coder" {}
+
+          provider "kubernetes" {
+            config_path = "\${path.module}/kubeconfig"
+          }
+
+          data "coder_workspace" "me" {}
+          data "coder_workspace_owner" "me" {}
+
+          resource "coder_agent" "main" {
+            arch           = "amd64"
+            os             = "linux"
+            startup_script = <<-EOT
+              #!/bin/bash
+              set -e
+              echo "Workspace started"
+            EOT
+          }
+
+          resource "kubernetes_persistent_volume_claim" "home" {
+            metadata {
+              name      = "coder-\${data.coder_workspace.me.id}-home"
+              namespace = "${{ inputs.namespace }}"
+            }
+            spec {
+              access_modes = ["ReadWriteOnce"]
+              resources {
+                requests = {
+                  storage = "${{ inputs.disk_size_gb }}Gi"
+                }
+              }
+            }
+          }
+
+          resource "kubernetes_pod" "main" {
+            count = data.coder_workspace.me.start_count
+            metadata {
+              name      = "coder-\${data.coder_workspace.me.id}"
+              namespace = "${{ inputs.namespace }}"
+              labels = {
+                "app"                    = "coder"
+                "com.coder.workspace.id" = data.coder_workspace.me.id
+                "team"                   = "TEAM_LABEL_PLACEHOLDER"
+                "managed-by"             = "port"
+              }
+            }
+            spec {
+              container {
+                name              = "workspace"
+                image             = "codercom/enterprise-base:ubuntu"
+                image_pull_policy = "IfNotPresent"
+                command           = ["sh", "-c", coder_agent.main.init_script]
+                resources {
+                  requests = {
+                    cpu    = "${{ inputs.cpu_request }}"
+                    memory = "${{ inputs.memory_request }}"
+                  }
+                  limits = {
+                    cpu    = "${{ inputs.cpu_request }}"
+                    memory = "${{ inputs.memory_request }}"
+                  }
+                }
+                env {
+                  name  = "CODER_AGENT_TOKEN"
+                  value = coder_agent.main.token
+                }
+                volume_mount {
+                  mount_path = "/home/coder"
+                  name       = "home"
+                }
+              }
+              volume {
+                name = "home"
+                persistent_volume_claim {
+                  claim_name = kubernetes_persistent_volume_claim.home.metadata[0].name
+                }
+              }
+            }
+          }
+
+          resource "coder_app" "code-server" {
+            agent_id     = coder_agent.main.id
+            slug         = "code-server"
+            display_name = "VS Code"
+            url          = "http://localhost:8080/?folder=/home/coder"
+            icon         = "/icon/code.svg"
+            subdomain    = false
+            share        = "owner"
+          }
+          TERRAFORM
+
+          sed -i '' "s|TEAM_LABEL_PLACEHOLDER|${TEAM_LABEL}|g" template/main.tf
+
+          # Flatten kubeconfig with in-cluster server address
+          kubectl config view --minify --flatten --context=minikube \
+            | sed 's|https://127.0.0.1:[0-9]*|https://kubernetes.default.svc.cluster.local:443|g' \
+            > template/kubeconfig
+
+          cat > template/startup.sh << 'STARTUP'
+          #!/bin/bash
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update && apt-get install -y --no-install-recommends \
+            curl wget ca-certificates gnupg lsb-release unzip zip \
+            build-essential software-properties-common apt-transport-https \
+            && rm -rf /var/lib/apt/lists/*
+          STARTUP
+
+          chmod +x template/startup.sh
+          echo "=== Generated main.tf ==="
+          cat template/main.tf
+
+      - name: Set up kubectl and ensure namespace exists
+        run: |
+          export KUBECONFIG="$HOME/.kube/config"
+          kubectl config use-context minikube
+          NAMESPACE="${{ inputs.namespace }}"
+          if [ -z "$NAMESPACE" ] || [ "$NAMESPACE" = "null" ]; then
+            NAMESPACE="coder-workspaces"
+          fi
+          if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
+            echo "Namespace '$NAMESPACE' already exists."
+          else
+            kubectl create namespace "$NAMESPACE"
+            kubectl label namespace "$NAMESPACE" managed-by=port
+            echo "Namespace created."
+          fi
+
+      - name: Push Template to Coder
+        id: push_template
         env:
-          CODER_URL: ${{ secrets.CODER_URL }}
+          CODER_URL: http://localhost:8080
           CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
           CODER_SESSION_TOKEN: ${{ secrets.CODER_TOKEN }}
         run: |
           set -euo pipefail
 
-          # Explicitly authenticate the Coder CLI
-          coder login "${{ secrets.CODER_URL }}" --token "${{ secrets.CODER_TOKEN }}"
+          # Login via localhost to avoid ngrok interstitial
+          coder login "http://localhost:8080" --token "${{ secrets.CODER_TOKEN }}"
 
-          TEMPLATE="${{ steps.fetch_template.outputs.template_name }}"
-          WS_NAME="${{ inputs.workspace_name }}"
+          TTL_SECS=$(( ${{ inputs.ttl_days }} * 86400 ))
 
-          coder create "$WS_NAME" \
-            --template="$TEMPLATE" \
-            --yes
+          if coder templates show "${{ inputs.template_name }}" 2>/dev/null; then
+            echo "Template exists — pushing new version..."
+            coder templates push "${{ inputs.template_name }}" \
+              --directory=template \
+              --name="${{ inputs.template_name }}-v${GITHUB_RUN_NUMBER}" \
+              --yes
+          else
+            echo "Creating new template '${{ inputs.template_name }}'..."
+            coder templates create "${{ inputs.template_name }}" \
+              --directory=template \
+              --default-ttl="${TTL_SECS}s" \
+              --yes
+          fi
 
-          # Get workspace URL
-          WS_URL="${{ secrets.CODER_URL }}/@${{ inputs.triggered_by }}/${WS_NAME}"
-          WS_ID=$(coder show "$WS_NAME" --output json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+          echo "template_url=http://localhost:8080/templates/${{ inputs.template_name }}" >> $GITHUB_OUTPUT
 
-          echo "workspace_url=$WS_URL" >> $GITHUB_OUTPUT
-          echo "workspace_id=$WS_ID" >> $GITHUB_OUTPUT
-          echo "Workspace created: $WS_URL"
-
-      # ── 5. Create Port entity ─────────────────────────────────────────────
-      - name: Create Port Workspace Entity
+      - name: Create Port Template Entity
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: UPSERT
-          identifier: ${{ inputs.workspace_name }}
-          title: ${{ inputs.workspace_name }}
-          blueprint: coder_workspace
+          identifier: ${{ inputs.template_name }}
+          title: ${{ inputs.display_name }}
+          blueprint: coder_template
           runId: ${{ inputs.port_run_id }}
-          relations: |-
-            {
-              "template": "${{ steps.fetch_template.outputs.entity_id }}"
-            }
           properties: |-
             {
-              "workspace_name": "${{ inputs.workspace_name }}",
-              "workspace_url": "${{ steps.create_workspace.outputs.workspace_url }}",
-              "status": "RUNNING",
-              "owner": "${{ inputs.triggered_by }}",
+              "template_name": "${{ inputs.template_name }}",
+              "display_name": "${{ inputs.display_name }}",
+              "description": "${{ inputs.description }}",
+              "tools": ${{ steps.tools.outputs.json }},
+              "cpu_request": "${{ inputs.cpu_request }}",
+              "memory_request": "${{ inputs.memory_request }}",
+              "disk_size_gb": ${{ inputs.disk_size_gb }},
+              "namespace": "${{ inputs.namespace || 'coder-workspaces' }}",
+              "ttl_days": ${{ inputs.ttl_days }},
               "team": "${{ inputs.team }}",
-              "ttl_days": ${{ steps.fetch_template.outputs.ttl_days }},
-              "namespace": "${{ steps.fetch_template.outputs.namespace }}",
-              "workspace_id": "${{ steps.create_workspace.outputs.workspace_id }}"
+              "coder_url": "${{ secrets.CODER_URL }}/templates/${{ inputs.template_name }}",
+              "status": "READY",
+              "created_by": "${{ inputs.triggered_by }}"
             }
 
-      # ── 6. Notify success ─────────────────────────────────────────────────
       - name: Notify Port - Success
         if: success()
         uses: port-labs/port-github-action@v1
@@ -172,9 +335,26 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: "SUCCESS"
-          logMessage: "✅ Workspace '${{ inputs.workspace_name }}' is running. URL: ${{ steps.create_workspace.outputs.workspace_url }}"
+          logMessage: "✅ Coder template '${{ inputs.display_name }}' created successfully."
 
-      # ── 7. Notify failure ─────────────────────────────────────────────────
+      - name: Mark Entity Failed
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.template_name }}
+          blueprint: coder_template
+          runId: ${{ inputs.port_run_id }}
+          properties: |-
+            {
+              "template_name": "${{ inputs.template_name }}",
+              "tools": ${{ steps.tools.outputs.json }},
+              "status": "FAILED"
+            }
+
       - name: Notify Port - Failure
         if: failure()
         uses: port-labs/port-github-action@v1
@@ -185,4 +365,4 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: "FAILURE"
-          logMessage: "❌ Failed to launch workspace '${{ inputs.workspace_name }}'. Check Actions logs."
+          logMessage: "❌ Failed to create Coder template '${{ inputs.template_name }}'. Check Actions logs."
