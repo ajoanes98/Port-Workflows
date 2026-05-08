@@ -115,144 +115,114 @@ jobs:
 
       - name: Generate Coder Template with Docker backend
         id: generate
+        shell: python3 {0}
         run: |
-          set -euo pipefail
-          TOOLS="${{ steps.tools.outputs.csv }}"
-          NODE_VER="${{ inputs.node_version }}"
-          PY_VER="${{ inputs.python_version }}"
-          mkdir -p template
+          import os
 
-          # main.tf — Docker provider using local Docker Desktop socket
-          cat > template/main.tf << 'TERRAFORM'
-          terraform {
-            required_providers {
-              coder = {
-                source  = "coder/coder"
-                version = "~> 0.11"
-              }
-              docker = {
-                source  = "kreuzwerker/docker"
-                version = "~> 3.0"
-              }
-            }
-          }
+          tools_raw = "${{ steps.tools.outputs.csv }}"
+          tools = [t.strip() for t in tools_raw.split(",") if t.strip()]
+          node_ver = "${{ inputs.node_version }}" or "20"
 
-          provider "coder" {}
+          os.makedirs("template", exist_ok=True)
 
-          provider "docker" {
-            host = "unix:///var/run/docker.sock"
-          }
+          # Build startup lines
+          lines = [
+              "#!/bin/bash",
+              "export DEBIAN_FRONTEND=noninteractive",
+              "apt-get update -qq",
+              "apt-get install -y --no-install-recommends curl wget ca-certificates gnupg lsb-release unzip zip build-essential software-properties-common apt-transport-https && rm -rf /var/lib/apt/lists/*",
+          ]
+          if "git-github-cli" in tools:
+              lines += [
+                  "apt-get update && apt-get install -y git",
+                  "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg",
+                  'echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list',
+                  "apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/* || true",
+              ]
+          if "nodejs" in tools:
+              lines.append(f"curl -fsSL https://deb.nodesource.com/setup_{node_ver}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/* || true")
+          if "python3" in tools:
+              lines.append("apt-get update && apt-get install -y python3 python3-venv python3-dev python3-pip && rm -rf /var/lib/apt/lists/* || true")
+          if "java17" in tools:
+              lines += [
+                  "apt-get update && apt-get install -y wget apt-transport-https && mkdir -p /etc/apt/keyrings",
+                  "wget -O - https://packages.adoptium.net/artifactory/api/gpg/key/public | tee /etc/apt/keyrings/adoptium.asc",
+                  'echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/adoptium.list',
+                  "apt-get update && apt-get install -y temurin-17-jdk && rm -rf /var/lib/apt/lists/* || true",
+              ]
+          if "terraform" in tools:
+              lines += [
+                  "wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg",
+                  'echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list',
+                  "apt-get update && apt-get install -y terraform && rm -rf /var/lib/apt/lists/* || true",
+              ]
+          if "gcloud-cli" in tools:
+              lines += [
+                  'echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list',
+                  "curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg",
+                  "apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/* || true",
+              ]
+          if "vscode-server" in tools:
+              lines += [
+                  "if ! command -v code-server &>/dev/null; then curl -fsSL https://code-server.dev/install.sh | sh || true; fi",
+                  "if command -v code-server &>/dev/null; then code-server --bind-addr 0.0.0.0:13337 --auth none & fi",
+              ]
+          lines.append('echo "Startup complete"')
 
-          data "coder_workspace" "me" {}
-          data "coder_workspace_owner" "me" {}
+          # Write startup.sh
+          with open("template/startup.sh", "w") as f:
+              f.write("\n".join(lines) + "\n")
 
-          resource "coder_agent" "main" {
-            arch           = "arm64"
-            os             = "linux"
-            startup_script = <<-EOT
-              #!/bin/bash
-              # Tool installation — continues even if individual steps fail
-              STARTUP_SCRIPT_PLACEHOLDER
-            EOT
-          }
+          # Indent startup lines for HCL heredoc
+          indented = "\n".join("              " + ln for ln in lines)
 
-          resource "docker_volume" "home" {
-            name = "coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}-home"
-          }
+          main_tf = (
+              "terraform {\n"
+              "  required_providers {\n"
+              "    coder = { source = \"coder/coder\", version = \"~> 0.11\" }\n"
+              "    docker = { source = \"kreuzwerker/docker\", version = \"~> 3.0\" }\n"
+              "  }\n"
+              "}\n\n"
+              "provider \"coder\" {}\n"
+              "provider \"docker\" { host = \"unix:///var/run/docker.sock\" }\n\n"
+              "data \"coder_workspace\" \"me\" {}\n"
+              "data \"coder_workspace_owner\" \"me\" {}\n\n"
+              "resource \"coder_agent\" \"main\" {\n"
+              "  arch = \"arm64\"\n"
+              "  os   = \"linux\"\n"
+              "  startup_script = <<-EOT\n"
+              + indented + "\n"
+              "  EOT\n"
+              "}\n\n"
+              "resource \"docker_volume\" \"home\" {\n"
+              "  name = \"coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}-home\"\n"
+              "}\n\n"
+              "resource \"docker_container\" \"workspace\" {\n"
+              "  count   = data.coder_workspace.me.start_count\n"
+              "  image   = \"codercom/enterprise-base:ubuntu\"\n"
+              "  name    = \"coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}\"\n"
+              "  command = [\"sh\", \"-c\", coder_agent.main.init_script]\n"
+              "  env     = [\"CODER_AGENT_TOKEN=${coder_agent.main.token}\"]\n"
+              "  host { host = \"host.docker.internal\"; ip = \"host-gateway\" }\n"
+              "  volumes { container_path = \"/home/coder\"; volume_name = docker_volume.home.name; read_only = false }\n"
+              "}\n\n"
+              "resource \"coder_app\" \"code-server\" {\n"
+              "  agent_id     = coder_agent.main.id\n"
+              "  slug         = \"code-server\"\n"
+              "  display_name = \"VS Code\"\n"
+              "  url          = \"http://localhost:13337/?folder=/home/coder\"\n"
+              "  icon         = \"/icon/code.svg\"\n"
+              "  subdomain    = false\n"
+              "  share        = \"owner\"\n"
+              "}\n"
+          )
 
-          resource "docker_container" "workspace" {
-            count   = data.coder_workspace.me.start_count
-            image   = "codercom/enterprise-base:ubuntu"
-            name    = "coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}"
-            command = ["sh", "-c", coder_agent.main.init_script]
+          with open("template/main.tf", "w") as f:
+              f.write(main_tf)
 
-            env = [
-              "CODER_AGENT_TOKEN=${coder_agent.main.token}"
-            ]
+          print("Generated main.tf successfully")
+          print(open("template/main.tf").read())
 
-            host {
-              host = "host.docker.internal"
-              ip   = "host-gateway"
-            }
-
-            volumes {
-              container_path = "/home/coder"
-              volume_name    = docker_volume.home.name
-              read_only      = false
-            }
-          }
-
-          resource "coder_app" "code-server" {
-            agent_id     = coder_agent.main.id
-            slug         = "code-server"
-            display_name = "VS Code"
-            url          = "http://localhost:13337/?folder=/home/coder"
-            icon         = "/icon/code.svg"
-            subdomain    = false
-            share        = "owner"
-          }
-          TERRAFORM
-
-          echo "=== Generated main.tf ==="
-          cat template/main.tf
-
-          # Write startup script to a separate file
-          STARTUP_FILE="template/startup.sh"
-          echo '#!/bin/bash' > "$STARTUP_FILE"
-          echo 'export DEBIAN_FRONTEND=noninteractive' >> "$STARTUP_FILE"
-          echo 'apt-get update -qq' >> "$STARTUP_FILE"
-          echo 'apt-get install -y --no-install-recommends curl wget ca-certificates gnupg lsb-release unzip zip build-essential software-properties-common apt-transport-https python3-launchpadlib && rm -rf /var/lib/apt/lists/*' >> "$STARTUP_FILE"
-
-          if echo "$TOOLS" | grep -q "git-github-cli"; then
-            echo 'apt-get update && apt-get install -y git && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
-          fi
-
-          if echo "$TOOLS" | grep -q "nodejs"; then
-            echo "curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/* || true" >> "$STARTUP_FILE"
-          fi
-
-          if echo "$TOOLS" | grep -q "python3"; then
-            echo 'apt-get update && apt-get install -y python3 python3-venv python3-dev python3-pip && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
-          fi
-
-          if echo "$TOOLS" | grep -q "java17"; then
-            echo 'apt-get update && apt-get install -y wget apt-transport-https && mkdir -p /etc/apt/keyrings && wget -O - https://packages.adoptium.net/artifactory/api/gpg/key/public | tee /etc/apt/keyrings/adoptium.asc && echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/adoptium.list && apt-get update && apt-get install -y temurin-17-jdk && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
-          fi
-
-          if echo "$TOOLS" | grep -q "terraform"; then
-            echo 'wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list && apt-get update && apt-get install -y terraform && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
-          fi
-
-          if echo "$TOOLS" | grep -q "gcloud-cli"; then
-            echo 'echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
-          fi
-
-          if echo "$TOOLS" | grep -q "vscode-server"; then
-            echo 'if ! command -v code-server &>/dev/null; then curl -fsSL https://code-server.dev/install.sh | sh || true; fi' >> "$STARTUP_FILE"
-            echo 'if command -v code-server &>/dev/null; then code-server --bind-addr 0.0.0.0:13337 --auth none & fi' >> "$STARTUP_FILE"
-          fi
-
-          echo 'echo "Startup complete"' >> "$STARTUP_FILE"
-          chmod +x "$STARTUP_FILE"
-
-          # Now embed startup.sh content directly into main.tf startup_script
-          STARTUP_CONTENT=$(cat "$STARTUP_FILE")
-          python3 - << PYEOF
-          import sys
-          with open('template/main.tf') as f:
-              tf = f.read()
-          with open('template/startup.sh') as f:
-              lines = f.readlines()
-          # Indent lines for HCL heredoc (14 spaces)
-          indented = ''.join('              ' + line for line in lines)
-          tf = tf.replace('              # Tool installation — continues even if individual steps fail\n              STARTUP_SCRIPT_PLACEHOLDER', indented.rstrip())
-          with open('template/main.tf', 'w') as f:
-              f.write(tf)
-          print('Startup script injected successfully')
-          PYEOF
-
-          echo "=== Final main.tf startup_script section ==="
-          grep -A 5 "startup_script" template/main.tf | head -20
 
       - name: Authenticate Coder CLI
         run: |
