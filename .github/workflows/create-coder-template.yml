@@ -147,16 +147,19 @@ jobs:
           data "coder_workspace_owner" "me" {}
 
           resource "coder_agent" "main" {
-            arch           = "amd64"
+            arch           = "arm64"
             os             = "linux"
             startup_script = <<-EOT
               #!/bin/bash
-              set -e
-              # Install code-server if not present
+              # Install code-server if not present — tolerates failures
               if ! command -v code-server &>/dev/null; then
-                curl -fsSL https://code-server.dev/install.sh | sh
+                curl -fsSL https://code-server.dev/install.sh | sh || true
               fi
-              code-server --bind-addr 0.0.0.0:13337 --auth none &
+              # Start code-server if available
+              if command -v code-server &>/dev/null; then
+                code-server --bind-addr 0.0.0.0:13337 --auth none &
+              fi
+              echo "Startup complete"
             EOT
           }
 
