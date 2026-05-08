@@ -124,8 +124,12 @@ jobs:
               --yes
           fi
 
-          WS_URL="${{ secrets.CODER_URL }}/@${{ inputs.triggered_by }}/${WS_NAME}"
-          WS_ID=$(coder show "$WS_NAME" --output json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null || echo "")
+          WS_URL="${{ secrets.CODER_URL }}/workspaces"
+          WS_ID=$(coder show "$WS_NAME" --output json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+          WS_OWNER=$(coder show "$WS_NAME" --output json 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('owner_name',''))" 2>/dev/null || echo "")
+          if [ -n "$WS_OWNER" ]; then
+            WS_URL="${{ secrets.CODER_URL }}/@${WS_OWNER}/${WS_NAME}"
+          fi
 
           echo "workspace_url=$WS_URL" >> $GITHUB_OUTPUT
           echo "workspace_id=$WS_ID" >> $GITHUB_OUTPUT
