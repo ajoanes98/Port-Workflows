@@ -37,22 +37,23 @@ on:
         type: string
       namespace:
         description: "Kubernetes namespace"
-        required: true
+        required: false
+        default: "coder-workspaces"
         type: string
       cpu_request:
         description: "CPU request per workspace"
         required: false
-        default: "2"
+        default: "1"
         type: string
       memory_request:
         description: "Memory request per workspace"
         required: false
-        default: "4Gi"
+        default: "1Gi"
         type: string
       disk_size_gb:
         description: "Persistent home disk size in GB"
         required: false
-        default: "50"
+        default: "10"
         type: string
       ttl_days:
         description: "Max TTL in days (1-7)"
@@ -76,7 +77,6 @@ jobs:
       contents: read
 
     steps:
-      # ── 1. Notify Port ────────────────────────────────────────────────────
       - name: Notify Port - In Progress
         uses: port-labs/port-github-action@v1
         with:
@@ -87,14 +87,12 @@ jobs:
           runId: ${{ inputs.port_run_id }}
           logMessage: "Starting Coder template creation for '${{ inputs.template_name }}'..."
 
-      # ── 2. Parse tools ────────────────────────────────────────────────────
       - name: Parse tools
         id: tools
         if: always()
         shell: python3 {0}
         run: |
           import json, os
-
           raw = '${{ inputs.tools }}'.strip()
           try:
               parsed = json.loads(raw)
@@ -102,22 +100,19 @@ jobs:
                   parsed = []
           except Exception:
               parsed = []
-
           csv  = ','.join(parsed)
           jarr = json.dumps(parsed)
-
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f'csv={csv}\n')
               f.write(f'json={jarr}\n')
-
           print(f'Tools CSV : {csv}')
           print(f'Tools JSON: {jarr}')
 
-      # ── 4. Install Coder CLI ──────────────────────────────────────────────
       - name: Install Coder CLI
         run: |
           curl -fsSL https://coder.com/install.sh | sh
           coder version
+
       - name: Generate Coder Terraform Template
         id: generate
         run: |
@@ -125,14 +120,11 @@ jobs:
           TOOLS="${{ steps.tools.outputs.csv }}"
           NODE_VER="${{ inputs.node_version }}"
           PY_VER="${{ inputs.python_version }}"
-          TTL_SECS=$(( ${{ inputs.ttl_days }} * 86400 ))
 
           mkdir -p template
 
-          # ── Decode kubeconfig for Kubernetes provider ────────────────────
-          echo "${{ secrets.MINIKUBE_KUBECONFIG_B64 }}" | base64 --decode > /tmp/minikube.kubeconfig
+          TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-_.')
 
-          # ── main.tf — Kubernetes provider pointing at minikube ────────────
           cat > template/main.tf << TERRAFORM
           terraform {
             required_providers {
@@ -162,10 +154,7 @@ jobs:
             startup_script = <<-EOT
               #!/bin/bash
               set -e
-              echo "Workspace started for \${data.coder_workspace_owner.me.name}"
-              if [ -f /home/coder/startup.sh ]; then
-                bash /home/coder/startup.sh
-              fi
+              echo "Workspace started"
             EOT
           }
 
@@ -198,9 +187,10 @@ jobs:
             }
             spec {
               container {
-                name    = "workspace"
-                image   = "codercom/enterprise-base:ubuntu"
-                command = ["sh", "-c", coder_agent.main.init_script]
+                name              = "workspace"
+                image             = "codercom/enterprise-base:ubuntu"
+                image_pull_policy = "IfNotPresent"
+                command           = ["sh", "-c", coder_agent.main.init_script]
                 resources {
                   requests = {
                     cpu    = "${{ inputs.cpu_request }}"
@@ -240,18 +230,13 @@ jobs:
           }
           TERRAFORM
 
-          # Sanitize team name for use as a Kubernetes label
-          TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-_.')
-
-          # Replace team label placeholder in generated main.tf
           sed -i '' "s|TEAM_LABEL_PLACEHOLDER|${TEAM_LABEL}|g" template/main.tf
 
-          # Generate kubeconfig with in-cluster server address so Coder can reach K8s API from inside minikube
+          # Flatten kubeconfig with in-cluster server address
           kubectl config view --minify --flatten --context=minikube \
             | sed 's|https://127.0.0.1:[0-9]*|https://kubernetes.default.svc.cluster.local:443|g' \
             > template/kubeconfig
 
-          # ── startup.sh — tool installation ───────────────────────────────
           cat > template/startup.sh << 'STARTUP'
           #!/bin/bash
           set -euo pipefail
@@ -262,125 +247,40 @@ jobs:
             && rm -rf /var/lib/apt/lists/*
           STARTUP
 
-          if echo "$TOOLS" | grep -q "git-github-cli"; then
-            cat >> template/startup.sh << 'BLOCK'
-          apt-get update && apt-get install -y --no-install-recommends git && \
-            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-              | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-              | tee /etc/apt/sources.list.d/github-cli.list && \
-            apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
-          BLOCK
-          fi
-
-          if echo "$TOOLS" | grep -q "nodejs"; then
-            echo "curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*" >> template/startup.sh
-          fi
-
-          if echo "$TOOLS" | grep -q "python3"; then
-            echo "add-apt-repository ppa:deadsnakes/ppa -y && apt-get update && apt-get install -y python${PY_VER} python${PY_VER}-venv python${PY_VER}-dev python3-pip && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PY_VER} 1 && rm -rf /var/lib/apt/lists/*" >> template/startup.sh
-          fi
-
-          if echo "$TOOLS" | grep -q "java17"; then
-            cat >> template/startup.sh << 'BLOCK'
-          apt-get update && apt-get install -y wget apt-transport-https && \
-            mkdir -p /etc/apt/keyrings && \
-            wget -O - https://packages.adoptium.net/artifactory/api/gpg/key/public | tee /etc/apt/keyrings/adoptium.asc && \
-            echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \
-              | tee /etc/apt/sources.list.d/adoptium.list && \
-            apt-get update && apt-get install -y temurin-17-jdk && rm -rf /var/lib/apt/lists/*
-          BLOCK
-          fi
-
-          if echo "$TOOLS" | grep -q "kubectl"; then
-            cat >> template/startup.sh << 'BLOCK'
-          curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key \
-            | gpg --dearmor -o /usr/share/keyrings/kubernetes-apt-keyring.gpg && \
-            echo "deb [signed-by=/usr/share/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /" \
-              | tee /etc/apt/sources.list.d/kubernetes.list && \
-            apt-get update && apt-get install -y kubectl && rm -rf /var/lib/apt/lists/*
-          BLOCK
-          fi
-
-          if echo "$TOOLS" | grep -q "terraform"; then
-            cat >> template/startup.sh << 'BLOCK'
-          wget -O- https://apt.releases.hashicorp.com/gpg \
-            | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && \
-            echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
-              | tee /etc/apt/sources.list.d/hashicorp.list && \
-            apt-get update && apt-get install -y terraform && rm -rf /var/lib/apt/lists/*
-          BLOCK
-          fi
-
-          if echo "$TOOLS" | grep -q "gcloud-cli"; then
-            cat >> template/startup.sh << 'BLOCK'
-          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
-            | tee /etc/apt/sources.list.d/google-cloud-sdk.list && \
-            curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-              | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && \
-            apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*
-          BLOCK
-          fi
-
-          if echo "$TOOLS" | grep -q "vscode-server"; then
-            echo "curl -fsSL https://code-server.dev/install.sh | sh && code-server --bind-addr 0.0.0.0:8080 &" >> template/startup.sh
-          fi
-
-          if echo "$TOOLS" | grep -q "docker"; then
-            cat >> template/startup.sh << 'BLOCK'
-          curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-            | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-              | tee /etc/apt/sources.list.d/docker.list && \
-            apt-get update && apt-get install -y docker-ce-cli docker-buildx-plugin && rm -rf /var/lib/apt/lists/*
-          BLOCK
-          fi
-
           chmod +x template/startup.sh
           echo "=== Generated main.tf ==="
           cat template/main.tf
-          echo "=== Generated startup.sh ==="
-          cat template/startup.sh
 
-      # ── 6. Set up kubectl and ensure namespace exists ─────────────────────
       - name: Set up kubectl and ensure namespace exists
         run: |
-          # Use local minikube kubeconfig directly (self-hosted runner on Mac)
           export KUBECONFIG="$HOME/.kube/config"
           kubectl config use-context minikube
-
           NAMESPACE="${{ inputs.namespace }}"
           if [ -z "$NAMESPACE" ] || [ "$NAMESPACE" = "null" ]; then
             NAMESPACE="coder-workspaces"
           fi
-
           if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
             echo "Namespace '$NAMESPACE' already exists."
           else
-            echo "Creating namespace '$NAMESPACE'..."
             kubectl create namespace "$NAMESPACE"
             kubectl label namespace "$NAMESPACE" managed-by=port
             echo "Namespace created."
           fi
 
-      # ── 7. Push template to Coder ─────────────────────────────────────────
       - name: Push Template to Coder
         id: push_template
         env:
-          CODER_URL: ${{ secrets.CODER_URL }}
+          CODER_URL: http://localhost:8080
           CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
           CODER_SESSION_TOKEN: ${{ secrets.CODER_TOKEN }}
         run: |
           set -euo pipefail
 
-          # Explicitly authenticate the Coder CLI
-          coder login "${{ secrets.CODER_URL }}" --token "${{ secrets.CODER_TOKEN }}"
+          # Login via localhost to avoid ngrok interstitial
+          coder login "http://localhost:8080" --token "${{ secrets.CODER_TOKEN }}"
 
           TTL_SECS=$(( ${{ inputs.ttl_days }} * 86400 ))
-          DISPLAY="${{ inputs.display_name }}"
-          DESC="${{ inputs.description }}"
 
-          # Check if template already exists
           if coder templates show "${{ inputs.template_name }}" 2>/dev/null; then
             echo "Template exists — pushing new version..."
             coder templates push "${{ inputs.template_name }}" \
@@ -395,12 +295,8 @@ jobs:
               --yes
           fi
 
-          # Get template URL
-          TEMPLATE_URL="${{ secrets.CODER_URL }}/templates/${{ inputs.template_name }}"
-          echo "template_url=$TEMPLATE_URL" >> $GITHUB_OUTPUT
-          echo "Template available at: $TEMPLATE_URL"
+          echo "template_url=http://localhost:8080/templates/${{ inputs.template_name }}" >> $GITHUB_OUTPUT
 
-      # ── 8. Create Port entity ─────────────────────────────────────────────
       - name: Create Port Template Entity
         uses: port-labs/port-github-action@v1
         with:
@@ -421,15 +317,14 @@ jobs:
               "cpu_request": "${{ inputs.cpu_request }}",
               "memory_request": "${{ inputs.memory_request }}",
               "disk_size_gb": ${{ inputs.disk_size_gb }},
-              "namespace": "${{ inputs.namespace || 'docker' }}",
+              "namespace": "${{ inputs.namespace || 'coder-workspaces' }}",
               "ttl_days": ${{ inputs.ttl_days }},
               "team": "${{ inputs.team }}",
-              "coder_url": "${{ steps.push_template.outputs.template_url }}",
+              "coder_url": "${{ secrets.CODER_URL }}/templates/${{ inputs.template_name }}",
               "status": "READY",
               "created_by": "${{ inputs.triggered_by }}"
             }
 
-      # ── 9. Notify success ─────────────────────────────────────────────────
       - name: Notify Port - Success
         if: success()
         uses: port-labs/port-github-action@v1
@@ -440,9 +335,8 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: "SUCCESS"
-          logMessage: "✅ Coder template '${{ inputs.display_name }}' created. URL: ${{ steps.push_template.outputs.template_url }}"
+          logMessage: "✅ Coder template '${{ inputs.display_name }}' created successfully."
 
-      # ── 10. Notify failure ────────────────────────────────────────────────
       - name: Mark Entity Failed
         if: failure()
         uses: port-labs/port-github-action@v1
