@@ -159,8 +159,10 @@ jobs:
 
       - name: Authenticate Coder CLI
         run: |
+          echo "Connecting to Coder at: ${{ secrets.CODER_URL }}"
+          curl -sf "${{ secrets.CODER_URL }}/api/v2/users/first" || echo "WARNING: Cannot reach Coder URL"
           CODER_TOKEN="${{ secrets.CODER_TOKEN }}"
-          coder login "http://localhost:8080" --token "$CODER_TOKEN"
+          coder login "${{ secrets.CODER_URL }}" --token "$CODER_TOKEN"
 
       - name: Push Template to Coder
         id: push_template
