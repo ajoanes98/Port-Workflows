@@ -176,46 +176,62 @@ jobs:
           # Indent startup lines for HCL heredoc
           indented = "\n".join("              " + ln for ln in lines)
 
-          main_tf = (
-              "terraform {\n"
-              "  required_providers {\n"
-              "    coder = { source = \"coder/coder\", version = \"~> 0.11\" }\n"
-              "    docker = { source = \"kreuzwerker/docker\", version = \"~> 3.0\" }\n"
-              "  }\n"
-              "}\n\n"
-              "provider \"coder\" {}\n"
-              "provider \"docker\" { host = \"unix:///var/run/docker.sock\" }\n\n"
-              "data \"coder_workspace\" \"me\" {}\n"
-              "data \"coder_workspace_owner\" \"me\" {}\n\n"
-              "resource \"coder_agent\" \"main\" {\n"
-              "  arch = \"arm64\"\n"
-              "  os   = \"linux\"\n"
-              "  startup_script = <<-EOT\n"
-              + indented + "\n"
-              "  EOT\n"
-              "}\n\n"
-              "resource \"docker_volume\" \"home\" {\n"
-              "  name = \"coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}-home\"\n"
-              "}\n\n"
-              "resource \"docker_container\" \"workspace\" {\n"
-              "  count   = data.coder_workspace.me.start_count\n"
-              "  image   = \"codercom/enterprise-base:ubuntu\"\n"
-              "  name    = \"coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}\"\n"
-              "  command = [\"sh\", \"-c\", coder_agent.main.init_script]\n"
-              "  env     = [\"CODER_AGENT_TOKEN=${coder_agent.main.token}\"]\n"
-              "  host { host = \"host.docker.internal\"; ip = \"host-gateway\" }\n"
-              "  volumes { container_path = \"/home/coder\"; volume_name = docker_volume.home.name; read_only = false }\n"
-              "}\n\n"
-              "resource \"coder_app\" \"code-server\" {\n"
-              "  agent_id     = coder_agent.main.id\n"
-              "  slug         = \"code-server\"\n"
-              "  display_name = \"VS Code\"\n"
-              "  url          = \"http://localhost:13337/?folder=/home/coder\"\n"
-              "  icon         = \"/icon/code.svg\"\n"
-              "  subdomain    = false\n"
-              "  share        = \"owner\"\n"
-              "}\n"
-          )
+          main_tf_lines = [
+              'terraform {',
+              '  required_providers {',
+              '    coder  = { source = "coder/coder",          version = "~> 0.11" }',
+              '    docker = { source = "kreuzwerker/docker",   version = "~> 3.0"  }',
+              '  }',
+              '}',
+              '',
+              'provider "coder"  {}',
+              'provider "docker" {',
+              '  host = "unix:///var/run/docker.sock"',
+              '}',
+              '',
+              'data "coder_workspace"       "me" {}',
+              'data "coder_workspace_owner" "me" {}',
+              '',
+              'resource "coder_agent" "main" {',
+              '  arch           = "arm64"',
+              '  os             = "linux"',
+              '  startup_script = <<-EOT',
+          ] + ['    ' + ln for ln in lines] + [
+              '  EOT',
+              '}',
+              '',
+              'resource "docker_volume" "home" {',
+              '  name = "coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}-home"',
+              '}',
+              '',
+              'resource "docker_container" "workspace" {',
+              '  count   = data.coder_workspace.me.start_count',
+              '  image   = "codercom/enterprise-base:ubuntu"',
+              '  name    = "coder-${data.coder_workspace_owner.me.name}-${data.coder_workspace.me.name}"',
+              '  command = ["sh", "-c", coder_agent.main.init_script]',
+              '  env     = ["CODER_AGENT_TOKEN=${coder_agent.main.token}"]',
+              '  host {',
+              '    host = "host.docker.internal"',
+              '    ip   = "host-gateway"',
+              '  }',
+              '  volumes {',
+              '    container_path = "/home/coder"',
+              '    volume_name    = docker_volume.home.name',
+              '    read_only      = false',
+              '  }',
+              '}',
+              '',
+              'resource "coder_app" "code-server" {',
+              '  agent_id     = coder_agent.main.id',
+              '  slug         = "code-server"',
+              '  display_name = "VS Code"',
+              '  url          = "http://localhost:13337/?folder=/home/coder"',
+              '  icon         = "/icon/code.svg"',
+              '  subdomain    = false',
+              '  share        = "owner"',
+              '}',
+          ]
+          main_tf = "\n".join(main_tf_lines) + "\n"
 
           with open("template/main.tf", "w") as f:
               f.write(main_tf)
