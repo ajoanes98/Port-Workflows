@@ -1,64 +1,86 @@
-name: Create Coder Template
+name: Create Workstation Config
 
 on:
   workflow_dispatch:
     inputs:
-      template_name:
-        description: "Unique template identifier"
+      config_id:
+        description: "Workstation config identifier"
         required: true
         type: string
       display_name:
-        description: "Human-readable display name"
-        required: true
-        type: string
-      description:
-        description: "Template description"
+        description: "Human-readable display name for the config"
         required: false
         default: ""
         type: string
-      team:
-        description: "Target team name"
+      dockerfile_entity:
+        description: "Port entity identifier of the source Dockerfile"
         required: true
         type: string
-      tools:
-        description: "JSON array of tools to install"
-        required: false
-        default: "[]"
+      team:
+        description: "Target team/role"
+        required: true
         type: string
-      node_version:
-        description: "Node.js version"
-        required: false
-        default: "20"
+      cluster:
+        description: "Workstation cluster name"
+        required: true
         type: string
-      python_version:
-        description: "Python version"
-        required: false
-        default: "3.12"
+      region:
+        description: "GCP region"
+        required: true
         type: string
-      namespace:
-        description: "Kubernetes namespace"
-        required: false
-        default: "coder-workspaces"
+      machine_type:
+        description: "GCE machine type"
+        required: true
         type: string
-      cpu_request:
-        description: "CPU request per workspace"
+      boot_disk_size_gb:
+        description: "Boot disk size in GB"
         required: false
-        default: "1"
+        default: "50"
         type: string
-      memory_request:
-        description: "Memory request per workspace"
-        required: false
-        default: "1Gi"
-        type: string
-      disk_size_gb:
+      persistent_disk_size_gb:
         description: "Persistent home disk size in GB"
         required: false
-        default: "10"
+        default: "100"
         type: string
-      ttl_days:
-        description: "Max TTL in days (1-7)"
+      persistent_disk_type:
+        description: "Persistent disk type"
         required: false
-        default: "1"
+        default: "pd-balanced"
+        type: string
+      idle_timeout_seconds:
+        description: "Idle timeout in seconds"
+        required: false
+        default: "1800"
+        type: string
+      running_timeout_hours:
+        description: "Max running timeout in hours"
+        required: false
+        default: "12"
+        type: string
+      disable_public_ip:
+        description: "Disable public IP"
+        required: false
+        default: "true"
+        type: string
+      enable_nested_virtualisation:
+        description: "Enable nested virtualisation"
+        required: false
+        default: "false"
+        type: string
+      enable_shielded_secure_boot:
+        description: "Shielded VM secure boot"
+        required: false
+        default: "false"
+        type: string
+      enable_shielded_vtpm:
+        description: "Shielded VM vTPM"
+        required: false
+        default: "false"
+        type: string
+      max_usable_workstations:
+        description: "Max concurrent workstations"
+        required: false
+        default: "10"
         type: string
       port_run_id:
         description: "Port action run ID"
@@ -70,14 +92,16 @@ on:
         type: string
 
 jobs:
-  create-coder-template:
-    name: Generate & Push Coder Template
-    runs-on: self-hosted
+  create-workstation-config:
+    name: Create GCP Workstation Config
+    runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write  # Required for Workload Identity Federation
 
     steps:
-      - name: Notify Port - In Progress
+      # ── 1. Notify Port: in progress ──────────────────────────────────────
+      - name: Notify Port – In Progress
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
@@ -85,135 +109,194 @@ jobs:
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
-          logMessage: "Starting Coder template creation for '${{ inputs.template_name }}'..."
+          logMessage: "Creating workstation config '${{ inputs.config_id }}' for team '${{ inputs.team }}'..."
 
-      - name: Parse tools
-        id: tools
-        if: always()
+      # ── 2. Authenticate to GCP via Workload Identity Federation ────────────
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      # ── 3. Fetch container image URI from Port entity ─────────────────────
+      - name: Fetch Dockerfile entity from Port
+        id: fetch_dockerfile
         shell: python3 {0}
+        env:
+          ENTITY_ID: ${{ inputs.dockerfile_entity }}
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
         run: |
-          import json, os
-          raw = '${{ inputs.tools }}'.strip()
+          import json, os, sys, urllib.request
+
+          client_id     = os.environ["PORT_CLIENT_ID"]
+          client_secret = os.environ["PORT_CLIENT_SECRET"]
+          entity_raw    = os.environ["ENTITY_ID"]
+          base_url      = "https://api.getport.io/v1"
+
+          # Port may pass the full entity object or just the identifier string
           try:
-              parsed = json.loads(raw)
-              if not isinstance(parsed, list):
-                  parsed = []
-          except Exception:
-              parsed = []
-          csv  = ','.join(parsed)
-          jarr = json.dumps(parsed)
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'csv={csv}\n')
-              f.write(f'json={jarr}\n')
-          print(f'Tools CSV : {csv}')
-          print(f'Tools JSON: {jarr}')
+              entity_obj = json.loads(entity_raw)
+              entity_id  = entity_obj.get("identifier", entity_raw)
+          except (json.JSONDecodeError, AttributeError):
+              entity_id  = entity_raw.strip()
 
-      - name: Install Coder CLI
+          auth_payload = json.dumps({"clientId": client_id, "clientSecret": client_secret}).encode()
+          req = urllib.request.Request(
+              f"{base_url}/auth/access_token",
+              data=auth_payload,
+              headers={"Content-Type": "application/json"})
+          with urllib.request.urlopen(req) as r:
+              token = json.loads(r.read())["accessToken"]
+
+          req2 = urllib.request.Request(
+              f"{base_url}/blueprints/gcp_dockerfile/entities/{entity_id}",
+              headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+          with urllib.request.urlopen(req2) as r:
+              data = json.loads(r.read())
+
+          container_image = data["entity"]["properties"].get("registry_path", "")
+          print(f"Resolved container image: {container_image}")
+
+          if not container_image:
+              print("::error::Could not resolve registry_path from Dockerfile entity")
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"container_image={container_image}\n")
+              f.write(f"entity_id={entity_id}\n")
+
+      # ── 4. Convert timeouts ───────────────────────────────────────────────
+      - name: Resolve display name
+        id: naming
         run: |
-          curl -fsSL https://coder.com/install.sh | sh
-          coder version
+          DISPLAY="${{ inputs.display_name }}"
+          if [ -z "$DISPLAY" ] || [ "$DISPLAY" = "null" ]; then
+            DISPLAY="${{ inputs.config_id }}"
+          fi
+          echo "title=${DISPLAY} (${{ inputs.team }})" >> $GITHUB_OUTPUT
 
-      - name: Generate Minimal Coder Template
-        id: generate
+      - name: Compute timeout values
+        id: timeouts
         run: |
-          set -euo pipefail
-          TOOLS="${{ steps.tools.outputs.csv }}"
-          mkdir -p template
+          IDLE="${{ inputs.idle_timeout_seconds }}"
+          RUNNING_SECS=$(( ${{ inputs.running_timeout_hours }} * 86400 ))
+          echo "idle_timeout=${IDLE}" >> $GITHUB_OUTPUT
+          echo "running_timeout=${RUNNING_SECS}" >> $GITHUB_OUTPUT
 
-          # Minimal main.tf — no Kubernetes or Docker required
-          # Uses a simple echo provider for demo purposes
-          cat > template/main.tf << 'TERRAFORM'
-          terraform {
-            required_providers {
-              coder = {
-                source  = "coder/coder"
-                version = "~> 0.11"
-              }
-            }
-          }
-
-          provider "coder" {}
-
-          data "coder_workspace" "me" {}
-          data "coder_workspace_owner" "me" {}
-
-          resource "coder_agent" "main" {
-            arch           = "amd64"
-            os             = "linux"
-            startup_script = "echo 'Workspace started'"
-          }
-
-          resource "coder_app" "code-server" {
-            agent_id     = coder_agent.main.id
-            slug         = "code-server"
-            display_name = "VS Code"
-            url          = "http://localhost:8080/?folder=/home/coder"
-            icon         = "/icon/code.svg"
-            subdomain    = false
-            share        = "owner"
-          }
-          TERRAFORM
-
-          echo "=== Generated main.tf ==="
-          cat template/main.tf
-
-      - name: Authenticate Coder CLI
+      # ── 5. Ensure Workstation Cluster exists ──────────────────────────────
+      - name: Ensure Workstation Cluster exists
         run: |
-          CODER_TOKEN="${{ secrets.CODER_TOKEN }}"
-          coder login "${{ secrets.CODER_URL }}" --token "$CODER_TOKEN"
+          CLUSTER="${{ inputs.cluster }}"
+          REGION="${{ inputs.region }}"
+          PROJECT="${{ secrets.GCP_PROJECT_ID }}"
 
-      - name: Push Template to Coder
-        id: push_template
-        run: |
-          set -euo pipefail
-          TTL_SECS=$(( ${{ inputs.ttl_days }} * 86400 ))
-
-          if coder templates show "${{ inputs.template_name }}" 2>/dev/null; then
-            echo "Template exists — pushing new version..."
-            coder templates push "${{ inputs.template_name }}" \
-              --directory=template \
-              --name="${{ inputs.template_name }}-v${GITHUB_RUN_NUMBER}" \
-              --yes
+          if gcloud workstations clusters describe "$CLUSTER" \
+              --region="$REGION" \
+              --project="$PROJECT" 2>/dev/null; then
+            echo "Cluster '$CLUSTER' already exists — skipping creation."
           else
-            echo "Creating new template '${{ inputs.template_name }}'..."
-            coder templates create "${{ inputs.template_name }}" \
-              --directory=template \
-              --default-ttl="${TTL_SECS}s" \
-              --yes
+            echo "Cluster '$CLUSTER' not found — creating (this may take 5-10 minutes)..."
+            gcloud workstations clusters create "$CLUSTER" \
+              --region="$REGION" \
+              --project="$PROJECT"
+            echo "Cluster '$CLUSTER' created successfully."
           fi
 
-          echo "template_url=http://localhost:8080/templates/${{ inputs.template_name }}" >> $GITHUB_OUTPUT
-          echo "Template pushed successfully."
+      # ── 6. Create Workstation Config via gcloud ───────────────────────────
+      - name: Create Workstation Config via gcloud
+        id: create_config
+        run: |
+          set -euo pipefail
 
-      - name: Create Port Template Entity
+          # Base flags
+          CMD="gcloud workstations configs create ${{ inputs.config_id }} \
+            --cluster=${{ inputs.cluster }} \
+            --region=${{ inputs.region }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --machine-type=${{ inputs.machine_type }} \
+            --boot-disk-size=${{ inputs.boot_disk_size_gb }} \
+            --idle-timeout=${{ steps.timeouts.outputs.idle_timeout }} \
+            --running-timeout=${{ steps.timeouts.outputs.running_timeout }} \
+            --max-usable-workstations-count=${{ inputs.max_usable_workstations }} \
+            --container-custom-image=${{ steps.fetch_dockerfile.outputs.container_image }}"
+
+          # Public IP
+          if [ "${{ inputs.disable_public_ip }}" = "true" ]; then
+            CMD="$CMD --disable-public-ip-addresses"
+          fi
+
+          # Nested virtualisation (required for Docker-in-Docker)
+          if [ "${{ inputs.enable_nested_virtualisation }}" = "true" ]; then
+            CMD="$CMD --enable-nested-virtualization"
+          fi
+
+          # Shielded VM
+          if [ "${{ inputs.enable_shielded_secure_boot }}" = "true" ]; then
+            CMD="$CMD --shielded-secure-boot"
+          fi
+          if [ "${{ inputs.enable_shielded_vtpm }}" = "true" ]; then
+            CMD="$CMD --shielded-vtpm"
+          fi
+
+          # Labels for team ownership and traceability
+          TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-')
+          CMD="$CMD --labels=team=${TEAM_LABEL},managed-by=port,created-by=self-service"
+
+          # Persistent home disk
+          CMD="$CMD --pd-disk-type=${{ inputs.persistent_disk_type }} \
+            --pd-disk-size=${{ inputs.persistent_disk_size_gb }} \
+            --pd-reclaim-policy=retain"
+
+          # Execute
+          echo "Running: $CMD"
+          eval "$CMD --format=json" | tee /tmp/config_output.json
+
+          CONFIG_NAME=$(jq -r '.name' /tmp/config_output.json)
+          echo "config_name=$CONFIG_NAME" >> $GITHUB_OUTPUT
+
+      # ── 6. Create Port entity ─────────────────────────────────────────────
+      - name: Create Port Workstation Config Entity
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: UPSERT
-          identifier: ${{ inputs.template_name }}
-          title: ${{ inputs.display_name }}
-          blueprint: coder_template
+          identifier: ${{ inputs.config_id }}
+          title: "${{ steps.naming.outputs.title }}"
+          blueprint: gcp_workstation_config
           runId: ${{ inputs.port_run_id }}
-          properties: |-
+          relations: |
             {
-              "template_name": "${{ inputs.template_name }}",
-              "display_name": "${{ inputs.display_name }}",
-              "description": "${{ inputs.description }}",
-              "tools": ${{ steps.tools.outputs.json }},
-              "cpu_request": "${{ inputs.cpu_request }}",
-              "memory_request": "${{ inputs.memory_request }}",
-              "disk_size_gb": ${{ inputs.disk_size_gb }},
-              "namespace": "${{ inputs.namespace }}",
-              "ttl_days": ${{ inputs.ttl_days }},
+              "dockerfile": "${{ steps.fetch_dockerfile.outputs.entity_id }}"
+            }
+          properties: |
+            {
+              "config_id": "${{ inputs.config_id }}",
+              "cluster": "${{ inputs.cluster }}",
+              "region": "${{ inputs.region }}",
+              "machine_type": "${{ inputs.machine_type }}",
+              "boot_disk_size_gb": ${{ inputs.boot_disk_size_gb }},
+              "persistent_disk_size_gb": ${{ inputs.persistent_disk_size_gb }},
+              "persistent_disk_type": "${{ inputs.persistent_disk_type }}",
+              "idle_timeout": "${{ steps.timeouts.outputs.idle_timeout }}",
+              "running_timeout": "${{ steps.timeouts.outputs.running_timeout }}",
+              "disable_public_ip": ${{ inputs.disable_public_ip }},
+              "enable_nested_virt": ${{ inputs.enable_nested_virtualisation }},
+              "shielded_secure_boot": ${{ inputs.enable_shielded_secure_boot }},
+              "shielded_vtpm": ${{ inputs.enable_shielded_vtpm }},
+              "container_image": "${{ steps.fetch_dockerfile.outputs.container_image }}",
               "team": "${{ inputs.team }}",
-              "coder_url": "${{ secrets.CODER_URL }}/templates/${{ inputs.template_name }}",
               "status": "READY",
               "created_by": "${{ inputs.triggered_by }}"
             }
 
-      - name: Notify Port - Success
+      # ── 7. Report success ─────────────────────────────────────────────────
+      - name: Notify Port – Success
         if: success()
         uses: port-labs/port-github-action@v1
         with:
@@ -223,27 +306,14 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: "SUCCESS"
-          logMessage: "✅ Coder template '${{ inputs.display_name }}' created. URL: ${{ secrets.CODER_URL }}/templates/${{ inputs.template_name }}"
+          logMessage: |
+            ✅ Workstation config '${{ inputs.config_id }}' created and registered.
+            Team: ${{ inputs.team }} | Machine: ${{ inputs.machine_type }} | Region: ${{ inputs.region }}
+            Container: ${{ steps.fetch_dockerfile.outputs.container_image }}
+            Next step: Use "Launch My Workstation" to spin up a workstation from this config.
 
-      - name: Mark Entity Failed
-        if: failure()
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
-          operation: UPSERT
-          identifier: ${{ inputs.template_name }}
-          blueprint: coder_template
-          runId: ${{ inputs.port_run_id }}
-          properties: |-
-            {
-              "template_name": "${{ inputs.template_name }}",
-              "tools": ${{ steps.tools.outputs.json }},
-              "status": "FAILED"
-            }
-
-      - name: Notify Port - Failure
+      # ── 8. Report failure ─────────────────────────────────────────────────
+      - name: Notify Port – Failure
         if: failure()
         uses: port-labs/port-github-action@v1
         with:
@@ -253,4 +323,4 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: "FAILURE"
-          logMessage: "❌ Failed to create Coder template '${{ inputs.template_name }}'. Check Actions logs."
+          logMessage: "❌ Failed to create workstation config '${{ inputs.config_id }}'. Check Actions logs."
