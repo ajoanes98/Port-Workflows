@@ -151,6 +151,7 @@ jobs:
             os             = "linux"
             startup_script = <<-EOT
               #!/bin/bash
+              # Tool installation — continues even if individual steps fail
               STARTUP_SCRIPT_PLACEHOLDER
             EOT
           }
@@ -195,57 +196,63 @@ jobs:
           echo "=== Generated main.tf ==="
           cat template/main.tf
 
-          # ── Build startup script dynamically based on selected tools ─────
-          STARTUP=""
-          STARTUP="${STARTUP}export DEBIAN_FRONTEND=noninteractive\n"
-          STARTUP="${STARTUP}apt-get update -qq && apt-get install -y --no-install-recommends curl wget ca-certificates gnupg lsb-release unzip zip build-essential software-properties-common apt-transport-https && rm -rf /var/lib/apt/lists/*\n"
+          # Write startup script to a separate file
+          STARTUP_FILE="template/startup.sh"
+          echo '#!/bin/bash' > "$STARTUP_FILE"
+          echo 'export DEBIAN_FRONTEND=noninteractive' >> "$STARTUP_FILE"
+          echo 'apt-get update -qq' >> "$STARTUP_FILE"
+          echo 'apt-get install -y --no-install-recommends curl wget ca-certificates gnupg lsb-release unzip zip build-essential software-properties-common apt-transport-https python3-launchpadlib && rm -rf /var/lib/apt/lists/*' >> "$STARTUP_FILE"
 
           if echo "$TOOLS" | grep -q "git-github-cli"; then
-            STARTUP="${STARTUP}apt-get update && apt-get install -y git && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" | tee /etc/apt/sources.list.d/github-cli.list && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*\n"
+            echo 'apt-get update && apt-get install -y git && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
           fi
 
           if echo "$TOOLS" | grep -q "nodejs"; then
-            STARTUP="${STARTUP}curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*\n"
+            echo "curl -fsSL https://deb.nodesource.com/setup_${NODE_VER}.x | bash - && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/* || true" >> "$STARTUP_FILE"
           fi
 
           if echo "$TOOLS" | grep -q "python3"; then
-            STARTUP="${STARTUP}add-apt-repository ppa:deadsnakes/ppa -y && apt-get update && apt-get install -y python${PY_VER} python${PY_VER}-venv python${PY_VER}-dev python3-pip && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PY_VER} 1 && rm -rf /var/lib/apt/lists/*\n"
+            echo 'apt-get update && apt-get install -y python3 python3-venv python3-dev python3-pip && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
           fi
 
           if echo "$TOOLS" | grep -q "java17"; then
-            STARTUP="${STARTUP}apt-get update && apt-get install -y wget apt-transport-https && mkdir -p /etc/apt/keyrings && wget -O - https://packages.adoptium.net/artifactory/api/gpg/key/public | tee /etc/apt/keyrings/adoptium.asc && echo \"deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb \$(lsb_release -cs) main\" | tee /etc/apt/sources.list.d/adoptium.list && apt-get update && apt-get install -y temurin-17-jdk && rm -rf /var/lib/apt/lists/*\n"
+            echo 'apt-get update && apt-get install -y wget apt-transport-https && mkdir -p /etc/apt/keyrings && wget -O - https://packages.adoptium.net/artifactory/api/gpg/key/public | tee /etc/apt/keyrings/adoptium.asc && echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/adoptium.list && apt-get update && apt-get install -y temurin-17-jdk && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
           fi
 
           if echo "$TOOLS" | grep -q "terraform"; then
-            STARTUP="${STARTUP}wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && echo \"deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com \$(lsb_release -cs) main\" | tee /etc/apt/sources.list.d/hashicorp.list && apt-get update && apt-get install -y terraform && rm -rf /var/lib/apt/lists/*\n"
+            echo 'wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg && echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/hashicorp.list && apt-get update && apt-get install -y terraform && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
           fi
 
           if echo "$TOOLS" | grep -q "gcloud-cli"; then
-            STARTUP="${STARTUP}echo \"deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main\" | tee /etc/apt/sources.list.d/google-cloud-sdk.list && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*\n"
+            echo 'echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg && apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/* || true' >> "$STARTUP_FILE"
           fi
 
           if echo "$TOOLS" | grep -q "vscode-server"; then
-            STARTUP="${STARTUP}if ! command -v code-server &>/dev/null; then curl -fsSL https://code-server.dev/install.sh | sh || true; fi\n"
-            STARTUP="${STARTUP}if command -v code-server &>/dev/null; then code-server --bind-addr 0.0.0.0:13337 --auth none & fi\n"
+            echo 'if ! command -v code-server &>/dev/null; then curl -fsSL https://code-server.dev/install.sh | sh || true; fi' >> "$STARTUP_FILE"
+            echo 'if command -v code-server &>/dev/null; then code-server --bind-addr 0.0.0.0:13337 --auth none & fi' >> "$STARTUP_FILE"
           fi
 
-          STARTUP="${STARTUP}echo 'Startup complete'\n"
+          echo 'echo "Startup complete"' >> "$STARTUP_FILE"
+          chmod +x "$STARTUP_FILE"
 
-          # Inject startup script into main.tf
-          printf '%s' "$STARTUP" > /tmp/startup_content.sh
-          # Use python to safely replace the placeholder
-          python3 << PYEOF
+          # Now embed startup.sh content directly into main.tf startup_script
+          STARTUP_CONTENT=$(cat "$STARTUP_FILE")
+          python3 - << PYEOF
+          import sys
           with open('template/main.tf') as f:
               tf = f.read()
-          with open('/tmp/startup_content.sh') as f:
-              startup = f.read()
-          # Indent each line for HCL heredoc (14 spaces)
-          indented = '\n'.join('              ' + line for line in startup.split('\n'))
-          tf = tf.replace('              STARTUP_SCRIPT_PLACEHOLDER', indented)
+          with open('template/startup.sh') as f:
+              lines = f.readlines()
+          # Indent lines for HCL heredoc (14 spaces)
+          indented = ''.join('              ' + line for line in lines)
+          tf = tf.replace('              # Tool installation — continues even if individual steps fail\n              STARTUP_SCRIPT_PLACEHOLDER', indented.rstrip())
           with open('template/main.tf', 'w') as f:
               f.write(tf)
-          print('Startup script injected into main.tf')
+          print('Startup script injected successfully')
           PYEOF
+
+          echo "=== Final main.tf startup_script section ==="
+          grep -A 5 "startup_script" template/main.tf | head -20
 
       - name: Authenticate Coder CLI
         run: |
