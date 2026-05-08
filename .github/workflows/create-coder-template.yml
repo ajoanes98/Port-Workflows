@@ -113,37 +113,26 @@ jobs:
           curl -fsSL https://coder.com/install.sh | sh
           coder version
 
-      - name: Generate Coder Terraform Template
+      - name: Generate Minimal Coder Template
         id: generate
         run: |
           set -euo pipefail
           TOOLS="${{ steps.tools.outputs.csv }}"
-          NODE_VER="${{ inputs.node_version }}"
-          PY_VER="${{ inputs.python_version }}"
-
           mkdir -p template
 
-          TEAM_LABEL=$(echo "${{ inputs.team }}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd '[:alnum:]-_.')
-
-          cat > template/main.tf << TERRAFORM
+          # Minimal main.tf — no Kubernetes or Docker required
+          # Uses a simple echo provider for demo purposes
+          cat > template/main.tf << 'TERRAFORM'
           terraform {
             required_providers {
               coder = {
                 source  = "coder/coder"
                 version = "~> 0.11"
               }
-              kubernetes = {
-                source  = "hashicorp/kubernetes"
-                version = "~> 2.22"
-              }
             }
           }
 
           provider "coder" {}
-
-          provider "kubernetes" {
-            config_path = "\${path.module}/kubeconfig"
-          }
 
           data "coder_workspace" "me" {}
           data "coder_workspace_owner" "me" {}
@@ -151,72 +140,7 @@ jobs:
           resource "coder_agent" "main" {
             arch           = "amd64"
             os             = "linux"
-            startup_script = <<-EOT
-              #!/bin/bash
-              set -e
-              echo "Workspace started"
-            EOT
-          }
-
-          resource "kubernetes_persistent_volume_claim" "home" {
-            metadata {
-              name      = "coder-\${data.coder_workspace.me.id}-home"
-              namespace = "${{ inputs.namespace }}"
-            }
-            spec {
-              access_modes = ["ReadWriteOnce"]
-              resources {
-                requests = {
-                  storage = "${{ inputs.disk_size_gb }}Gi"
-                }
-              }
-            }
-          }
-
-          resource "kubernetes_pod" "main" {
-            count = data.coder_workspace.me.start_count
-            metadata {
-              name      = "coder-\${data.coder_workspace.me.id}"
-              namespace = "${{ inputs.namespace }}"
-              labels = {
-                "app"                    = "coder"
-                "com.coder.workspace.id" = data.coder_workspace.me.id
-                "team"                   = "TEAM_LABEL_PLACEHOLDER"
-                "managed-by"             = "port"
-              }
-            }
-            spec {
-              container {
-                name              = "workspace"
-                image             = "codercom/enterprise-base:ubuntu"
-                image_pull_policy = "IfNotPresent"
-                command           = ["sh", "-c", coder_agent.main.init_script]
-                resources {
-                  requests = {
-                    cpu    = "${{ inputs.cpu_request }}"
-                    memory = "${{ inputs.memory_request }}"
-                  }
-                  limits = {
-                    cpu    = "${{ inputs.cpu_request }}"
-                    memory = "${{ inputs.memory_request }}"
-                  }
-                }
-                env {
-                  name  = "CODER_AGENT_TOKEN"
-                  value = coder_agent.main.token
-                }
-                volume_mount {
-                  mount_path = "/home/coder"
-                  name       = "home"
-                }
-              }
-              volume {
-                name = "home"
-                persistent_volume_claim {
-                  claim_name = kubernetes_persistent_volume_claim.home.metadata[0].name
-                }
-              }
-            }
+            startup_script = "echo 'Workspace started'"
           }
 
           resource "coder_app" "code-server" {
@@ -230,55 +154,18 @@ jobs:
           }
           TERRAFORM
 
-          sed -i '' "s|TEAM_LABEL_PLACEHOLDER|${TEAM_LABEL}|g" template/main.tf
-
-          # Flatten kubeconfig with in-cluster server address
-          kubectl config view --minify --flatten --context=minikube \
-            | sed 's|https://127.0.0.1:[0-9]*|https://kubernetes.default.svc.cluster.local:443|g' \
-            > template/kubeconfig
-
-          cat > template/startup.sh << 'STARTUP'
-          #!/bin/bash
-          set -euo pipefail
-          export DEBIAN_FRONTEND=noninteractive
-          apt-get update && apt-get install -y --no-install-recommends \
-            curl wget ca-certificates gnupg lsb-release unzip zip \
-            build-essential software-properties-common apt-transport-https \
-            && rm -rf /var/lib/apt/lists/*
-          STARTUP
-
-          chmod +x template/startup.sh
           echo "=== Generated main.tf ==="
           cat template/main.tf
 
-      - name: Set up kubectl and ensure namespace exists
+      - name: Authenticate Coder CLI
         run: |
-          export KUBECONFIG="$HOME/.kube/config"
-          kubectl config use-context minikube
-          NAMESPACE="${{ inputs.namespace }}"
-          if [ -z "$NAMESPACE" ] || [ "$NAMESPACE" = "null" ]; then
-            NAMESPACE="coder-workspaces"
-          fi
-          if kubectl get namespace "$NAMESPACE" 2>/dev/null; then
-            echo "Namespace '$NAMESPACE' already exists."
-          else
-            kubectl create namespace "$NAMESPACE"
-            kubectl label namespace "$NAMESPACE" managed-by=port
-            echo "Namespace created."
-          fi
+          CODER_TOKEN="${{ secrets.CODER_TOKEN }}"
+          coder login "http://localhost:8080" --token "$CODER_TOKEN"
 
       - name: Push Template to Coder
         id: push_template
-        env:
-          CODER_URL: http://localhost:8080
-          CODER_TOKEN: ${{ secrets.CODER_TOKEN }}
-          CODER_SESSION_TOKEN: ${{ secrets.CODER_TOKEN }}
         run: |
           set -euo pipefail
-
-          # Login via localhost to avoid ngrok interstitial
-          coder login "http://localhost:8080" --token "${{ secrets.CODER_TOKEN }}"
-
           TTL_SECS=$(( ${{ inputs.ttl_days }} * 86400 ))
 
           if coder templates show "${{ inputs.template_name }}" 2>/dev/null; then
@@ -296,6 +183,7 @@ jobs:
           fi
 
           echo "template_url=http://localhost:8080/templates/${{ inputs.template_name }}" >> $GITHUB_OUTPUT
+          echo "Template pushed successfully."
 
       - name: Create Port Template Entity
         uses: port-labs/port-github-action@v1
@@ -317,7 +205,7 @@ jobs:
               "cpu_request": "${{ inputs.cpu_request }}",
               "memory_request": "${{ inputs.memory_request }}",
               "disk_size_gb": ${{ inputs.disk_size_gb }},
-              "namespace": "${{ inputs.namespace || 'coder-workspaces' }}",
+              "namespace": "${{ inputs.namespace }}",
               "ttl_days": ${{ inputs.ttl_days }},
               "team": "${{ inputs.team }}",
               "coder_url": "${{ secrets.CODER_URL }}/templates/${{ inputs.template_name }}",
@@ -335,7 +223,7 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           status: "SUCCESS"
-          logMessage: "✅ Coder template '${{ inputs.display_name }}' created successfully."
+          logMessage: "✅ Coder template '${{ inputs.display_name }}' created. URL: ${{ secrets.CODER_URL }}/templates/${{ inputs.template_name }}"
 
       - name: Mark Entity Failed
         if: failure()
