@@ -1,0 +1,17 @@
+- name: Upsert Deployment Entity
+  uses: port-labs/port-github-action@v1
+  with:
+    identifier: "deploy-${{ github.run_id }}"
+    blueprint: deployment
+    properties: |
+      {
+        "status": "success",
+        "deployment_time": "${{ github.event.pull_request.merged_at }}",
+        "environment": "production"
+      }
+    relations: |
+      {
+        "service": "your-service-identifier"
+      }
+    clientId: ${{ secrets.PORT_CLIENT_ID }}
+    clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
