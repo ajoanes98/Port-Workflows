@@ -1,17 +1,33 @@
-- name: Upsert Deployment Entity
-  uses: port-labs/port-github-action@v1
-  with:
-    identifier: "deploy-${{ github.run_id }}"
-    blueprint: deployment
-    properties: |
-      {
-        "status": "success",
-        "deployment_time": "${{ github.event.pull_request.merged_at }}",
-        "environment": "production"
-      }
-    relations: |
-      {
-        "service": "your-service-identifier"
-      }
-    clientId: ${{ secrets.PORT_CLIENT_ID }}
-    clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+name: Sync Deployment to Port
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main  # Adjust this if your production branch is named differently (e.g., 'master')
+
+jobs:
+  upsert-to-port:
+    # Only run this if the PR was actually merged, not just closed without merging
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Upsert Deployment Entity
+        uses: port-labs/port-github-action@v1
+        with:
+          identifier: "deploy-${{ github.event.pull_request.number }}"
+          title: "PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+          blueprint: deployment
+          properties: |
+            {
+              "deploymentStatus": "success",
+              "environment": "production",
+              "deploymentTime": "${{ github.event.pull_request.merged_at }}"
+            }
+          relations: |
+            {
+              "service": "${{ github.event.repository.name }}"
+            }
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
