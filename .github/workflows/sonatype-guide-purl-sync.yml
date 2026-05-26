@@ -1,0 +1,309 @@
+# =============================================================================
+# Sonatype Guide — Automated Purl Sync (CI/CD Path)
+# =============================================================================
+#
+# Triggers on any push to main (or PR targeting main) that touches a dependency
+# manifest file. Extracts purls via syft, diffs against what's already tracked
+# in Port, and upserts net-new components via the search_oss_component action.
+#
+# Required GitHub secrets:
+#   PORT_CLIENT_ID       — Port API client ID
+#   PORT_CLIENT_SECRET   — Port API client secret
+#   SONATYPE_WEBHOOK_URL — Your webhook backend URL (same as secrets.SONATYPE_GUIDE_WEBHOOK_URL in Port)
+#
+# Required tools (installed in job steps below):
+#   syft       — SBOM generation (anchore/syft)
+#   jq         — JSON processing
+# =============================================================================
+
+name: Sync OSS purls to Sonatype Guide catalog
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Trigger only when a dependency manifest changes — avoids unnecessary runs
+      - "**/pom.xml"
+      - "**/build.gradle"
+      - "**/build.gradle.kts"
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/yarn.lock"
+      - "**/requirements.txt"
+      - "**/pyproject.toml"
+      - "**/Pipfile"
+      - "**/Pipfile.lock"
+      - "**/go.mod"
+      - "**/go.sum"
+      - "**/*.csproj"
+      - "**/packages.config"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/Gemfile"
+      - "**/Gemfile.lock"
+
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/pom.xml"
+      - "**/build.gradle"
+      - "**/build.gradle.kts"
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/yarn.lock"
+      - "**/requirements.txt"
+      - "**/pyproject.toml"
+      - "**/Pipfile"
+      - "**/Pipfile.lock"
+      - "**/go.mod"
+      - "**/go.sum"
+      - "**/*.csproj"
+      - "**/packages.config"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "**/Gemfile"
+      - "**/Gemfile.lock"
+
+  # Allow manual trigger for bootstrapping or re-sync
+  workflow_dispatch:
+    inputs:
+      fetch_remediation:
+        description: "Also fetch remediation recommendations for new purls"
+        type: boolean
+        default: true
+
+jobs:
+  sync-purls:
+    name: Extract purls and sync to Port
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout repo
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # 2. Install syft for SBOM/purl extraction
+      #    syft understands all major manifest formats and outputs CycloneDX JSON
+      #    with full purl fields. One command covers Maven, npm, PyPI, Go, etc.
+      # -----------------------------------------------------------------------
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+
+      # -----------------------------------------------------------------------
+      # 3. Generate SBOM for the repo
+      #    Output: sbom.json (CycloneDX format)
+      #    syft scans the entire repo directory and finds all manifests.
+      #    Adjust the path argument if you only want to scan a subdirectory.
+      # -----------------------------------------------------------------------
+      - name: Generate SBOM
+        run: |
+          syft . \
+            --output cyclonedx-json=sbom.json \
+            --exclude ".git/**" \
+            --exclude "**/test/**" \
+            --exclude "**/tests/**" \
+            --exclude "**/testFixtures/**" \
+            --exclude "**/*_test.go"
+
+      # -----------------------------------------------------------------------
+      # 4. Extract purls from the SBOM
+      #    Filters out:
+      #      - Components without a valid purl
+      #      - Components without a version (@-less purls)
+      #      - Internal/local packages (identified by "unknown" type or no namespace)
+      #    Output: purls.txt (one purl per line)
+      # -----------------------------------------------------------------------
+      - name: Extract purls from SBOM
+        run: |
+          jq -r '
+            .components[]
+            | select(.purl != null and .purl != "")
+            | select(.purl | contains("@"))
+            | select(.purl | startswith("pkg:"))
+            | .purl
+          ' sbom.json \
+            | sort -u \
+            > purls.txt
+
+          PURL_COUNT=$(wc -l < purls.txt | tr -d ' ')
+          echo "Extracted ${PURL_COUNT} unique purls from SBOM"
+          echo "PURL_COUNT=${PURL_COUNT}" >> "$GITHUB_ENV"
+
+      # -----------------------------------------------------------------------
+      # 5. Authenticate with Port API
+      #    Exchanges client credentials for a short-lived access token.
+      # -----------------------------------------------------------------------
+      - name: Get Port access token
+        id: port-auth
+        run: |
+          TOKEN_RESPONSE=$(curl -s -X POST \
+            "https://api.getport.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"clientId\": \"${{ secrets.PORT_CLIENT_ID }}\",
+              \"clientSecret\": \"${{ secrets.PORT_CLIENT_SECRET }}\"
+            }")
+
+          ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.accessToken')
+
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "Failed to obtain Port access token"
+            echo "$TOKEN_RESPONSE"
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "PORT_ACCESS_TOKEN=$ACCESS_TOKEN" >> "$GITHUB_ENV"
+          echo "Authenticated with Port API"
+
+      # -----------------------------------------------------------------------
+      # 6. Fetch currently tracked purls from Port
+      #    Queries the sonatype_guide_package_version blueprint to get all
+      #    packageUrl property values that are already in the catalog.
+      #    This is the diff baseline — we only upsert net-new purls.
+      # -----------------------------------------------------------------------
+      - name: Fetch existing tracked purls from Port
+        run: |
+          # Paginate through all entities (Port returns max 500 per page)
+          PAGE=1
+          > existing_purls.txt
+
+          while true; do
+            RESPONSE=$(curl -s -X GET \
+              "https://api.getport.io/v1/blueprints/sonatype_guide_package_version/entities?limit=500&page=${PAGE}" \
+              -H "Authorization: Bearer $PORT_ACCESS_TOKEN" \
+              -H "Content-Type: application/json")
+
+            # Extract packageUrl property from each entity
+            PAGE_PURLS=$(echo "$RESPONSE" | jq -r '.entities[].properties.packageUrl // empty')
+
+            if [ -z "$PAGE_PURLS" ]; then
+              break
+            fi
+
+            echo "$PAGE_PURLS" >> existing_purls.txt
+
+            # Check if there are more pages
+            TOTAL=$(echo "$RESPONSE" | jq '.total // 0')
+            FETCHED=$(wc -l < existing_purls.txt | tr -d ' ')
+            if [ "$FETCHED" -ge "$TOTAL" ]; then
+              break
+            fi
+
+            PAGE=$((PAGE + 1))
+          done
+
+          EXISTING_COUNT=$(wc -l < existing_purls.txt | tr -d ' ')
+          echo "Found ${EXISTING_COUNT} purls already tracked in Port"
+          echo "EXISTING_COUNT=${EXISTING_COUNT}" >> "$GITHUB_ENV"
+
+      # -----------------------------------------------------------------------
+      # 7. Diff: find net-new purls not yet in Port
+      #    comm -23 outputs lines in purls.txt that are NOT in existing_purls.txt
+      #    Both files must be sorted (purls.txt already is; sort existing too).
+      # -----------------------------------------------------------------------
+      - name: Compute net-new purls
+        run: |
+          sort existing_purls.txt -o existing_purls.txt
+
+          comm -23 purls.txt existing_purls.txt > new_purls.txt
+
+          NEW_COUNT=$(wc -l < new_purls.txt | tr -d ' ')
+          echo "Net-new purls to sync: ${NEW_COUNT}"
+          echo "NEW_COUNT=${NEW_COUNT}" >> "$GITHUB_ENV"
+
+          if [ "$NEW_COUNT" -eq 0 ]; then
+            echo "NOTHING_TO_SYNC=true" >> "$GITHUB_ENV"
+          fi
+
+      # -----------------------------------------------------------------------
+      # 8. Upsert net-new purls via the search_oss_component webhook
+      #    Calls the same webhook that backs the Port self-service action.
+      #    Rate-limited to 5 concurrent requests to avoid overwhelming the
+      #    Sonatype Guide API or burning through credits.
+      #
+      #    FETCH_REMEDIATION defaults to true (workflow_dispatch input if manual,
+      #    otherwise always true on push/PR).
+      # -----------------------------------------------------------------------
+      - name: Sync net-new purls to Sonatype Guide catalog
+        if: env.NOTHING_TO_SYNC != 'true'
+        run: |
+          FETCH_REMEDIATION="${{ github.event.inputs.fetch_remediation || 'true' }}"
+          SUCCESS=0
+          FAILED=0
+          FAILED_PURLS=""
+
+          # Process purls in batches with parallelism capped at 5
+          while IFS= read -r PURL; do
+            (
+              RESPONSE=$(curl -s -o /tmp/response_$(echo "$PURL" | md5sum | cut -d' ' -f1).json \
+                -w "%{http_code}" \
+                -X POST "${{ secrets.SONATYPE_WEBHOOK_URL }}" \
+                -H "Content-Type: application/json" \
+                -H "X-Port-Action: search_oss_component" \
+                -d "{
+                  \"packageUrl\": \"${PURL}\",
+                  \"fetchRemediation\": ${FETCH_REMEDIATION},
+                  \"portContext\": {
+                    \"triggeredBy\": \"ci/github-actions\",
+                    \"blueprintIdentifier\": \"sonatype_guide_package_version\",
+                    \"source\": \"${{ github.repository }}\",
+                    \"commit\": \"${{ github.sha }}\",
+                    \"ref\": \"${{ github.ref }}\"
+                  }
+                }")
+              echo "$RESPONSE $PURL" >> /tmp/sync_results.txt
+            ) &
+
+            # Cap parallelism at 5
+            while [ "$(jobs -r | wc -l)" -ge 5 ]; do
+              sleep 0.2
+            done
+          done < new_purls.txt
+
+          # Wait for all background jobs
+          wait
+
+          # Tally results
+          if [ -f /tmp/sync_results.txt ]; then
+            while IFS=' ' read -r STATUS_CODE PURL; do
+              if [[ "$STATUS_CODE" -ge 200 && "$STATUS_CODE" -lt 300 ]]; then
+                SUCCESS=$((SUCCESS + 1))
+              else
+                FAILED=$((FAILED + 1))
+                FAILED_PURLS="${FAILED_PURLS}\n  - ${PURL} (HTTP ${STATUS_CODE})"
+              fi
+            done < /tmp/sync_results.txt
+          fi
+
+          echo "Sync complete: ${SUCCESS} succeeded, ${FAILED} failed"
+
+          if [ -n "$FAILED_PURLS" ]; then
+            echo -e "Failed purls:${FAILED_PURLS}"
+          fi
+
+          if [ "$FAILED" -gt 0 ]; then
+            # Fail the job if any purls couldn't be synced
+            exit 1
+          fi
+
+      # -----------------------------------------------------------------------
+      # 9. Summary step — writes a job summary visible in the GitHub Actions UI
+      # -----------------------------------------------------------------------
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Sonatype Guide purl sync" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Purls in repo SBOM | ${{ env.PURL_COUNT || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Already tracked in Port | ${{ env.EXISTING_COUNT || '—' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Net-new purls synced | ${{ env.NEW_COUNT || '0' }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: \`${{ github.sha }}\` on \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
