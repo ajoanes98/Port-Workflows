@@ -43,11 +43,11 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.port.io
           operation: PATCH_RUN
           runId: ${{ fromJson(inputs.port_context).runId }}
           logMessage: "🚀 Starting service creation for '${{ inputs.service_name }}'..."
-          status: IN_PROGRESS
+      #    status: IN_PROGRESS
 
       # ── 2. Checkout the repo ─────────────────────────────────────────────
       - name: Checkout repository
@@ -240,7 +240,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_name }}
           title: ${{ inputs.service_name }}
@@ -264,7 +264,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.port.io
           operation: PATCH_RUN
           runId: ${{ fromJson(inputs.port_context).runId }}
           logMessage: "✅ Service '${{ inputs.service_name }}' created successfully! Branch: service/${{ inputs.service_name }}"
@@ -277,7 +277,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.port.io
           operation: PATCH_RUN
           runId: ${{ fromJson(inputs.port_context).runId }}
           logMessage: "❌ Failed to create service '${{ inputs.service_name }}'. Check the workflow logs."
