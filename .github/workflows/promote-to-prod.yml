@@ -1,0 +1,240 @@
+name: Promote to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_identifier:
+        description: "Port service identifier (entity ID)"
+        required: true
+        type: string
+      image_tag:
+        description: "Staging image tag to promote"
+        required: true
+        type: string
+      release_notes:
+        description: "Summary of changes in this release"
+        required: false
+        type: string
+      approved_by:
+        description: "Email of the approver (from Port)"
+        required: false
+        type: string
+      port_context:
+        description: "Port run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  pre-promotion-checks:
+    name: Pre-Promotion Validation
+    runs-on: ubuntu-latest
+    env:
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+    outputs:
+      critical_vulns: ${{ steps.checks.outputs.critical_vulns }}
+      sonar_quality_gate: ${{ steps.checks.outputs.sonar_quality_gate }}
+      staging_deployment_exists: ${{ steps.checks.outputs.staging_deployment_exists }}
+
+    steps:
+      - name: Report checks started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: |
+            🔍 Running pre-promotion checks for ${{ inputs.service_identifier }}:${{ inputs.image_tag }}
+            👤 Approved by: ${{ inputs.approved_by }}
+
+      - name: Run promotion validation checks
+        id: checks
+        run: |
+          # Get Port access token
+          TOKEN=$(curl -s -X POST https://api.getport.io/v1/auth/access_token \
+            -H "Content-Type: application/json" \
+            -d '{"clientId":"${{ secrets.PORT_CLIENT_ID }}","clientSecret":"${{ secrets.PORT_CLIENT_SECRET }}"}' \
+            | jq -r '.accessToken')
+
+          # Fetch service entity
+          ENTITY=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            "https://api.getport.io/v1/blueprints/service/entities/${{ inputs.service_identifier }}")
+
+          # Check critical vulnerabilities
+          CRITICAL_VULNS=$(echo "$ENTITY" | jq -r '.entity.properties.critical_sonar_vulnerabilities // 0')
+          SONAR_GATE=$(echo "$ENTITY" | jq -r '.entity.properties.last_sonar_analysis // "unknown"')
+          LIFECYCLE=$(echo "$ENTITY" | jq -r '.entity.properties.lifecycle_stage // "unknown"')
+
+          echo "critical_vulns=$CRITICAL_VULNS" >> $GITHUB_OUTPUT
+          echo "sonar_quality_gate=$SONAR_GATE" >> $GITHUB_OUTPUT
+
+          # Verify service is currently in Staging
+          if [ "$LIFECYCLE" == "Staging" ]; then
+            echo "staging_deployment_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "staging_deployment_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "Critical vulnerabilities: $CRITICAL_VULNS"
+          echo "Sonar last analysis: $SONAR_GATE"
+          echo "Current lifecycle stage: $LIFECYCLE"
+
+      - name: Enforce promotion gates
+        run: |
+          VULNS=${{ steps.checks.outputs.critical_vulns }}
+          STAGING=${{ steps.checks.outputs.staging_deployment_exists }}
+
+          GATE_FAILED=false
+
+          # Gate 1: Zero critical vulnerabilities
+          if [ "$VULNS" -gt 0 ]; then
+            echo "❌ GATE FAILED: $VULNS critical vulnerability(ies) detected."
+            GATE_FAILED=true
+          else
+            echo "✅ Security gate: 0 critical vulnerabilities"
+          fi
+
+          # Gate 2: Must be deployed to Staging first
+          if [ "$STAGING" != "true" ]; then
+            echo "❌ GATE FAILED: Service must be deployed to Staging before promoting to Production."
+            GATE_FAILED=true
+          else
+            echo "✅ Staging gate: Service has a Staging deployment"
+          fi
+
+          if [ "$GATE_FAILED" = true ]; then
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All promotion gates passed — proceeding to production deployment."
+
+      - name: Report gates passed
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "✅ Pre-promotion checks passed. Proceeding to production deployment."
+
+  promote:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs: [pre-promotion-checks]
+    environment:
+      name: Production
+      url: https://meijer-internal.com
+    env:
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+    steps:
+      - name: Report promotion started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "🚀 Promoting ${{ inputs.service_identifier }}:${{ inputs.image_tag }} to Production..."
+
+      # ------------------------------------------------------------------ #
+      # Replace this step with your actual production deployment mechanism
+      # ------------------------------------------------------------------ #
+      - name: Deploy to Production
+        run: |
+          echo "🐳 Image: ${{ inputs.service_identifier }}:${{ inputs.image_tag }}"
+          echo "☁️  Target: Production (Azure primary + GCP DR)"
+          echo ""
+          echo "--- Simulated production promotion steps ---"
+          echo "1. Authenticating with Azure Container Registry..."
+          echo "2. Tagging image as production-stable..."
+          echo "3. Applying Kubernetes manifests to namespace meijer-prod..."
+          echo "4. Performing blue/green switch..."
+          echo "5. Running smoke tests..."
+          echo "6. Verifying health endpoints..."
+          echo "7. Replicating to GCP (DR)..."
+          echo ""
+          echo "✅ Production promotion complete."
+          # Replace with real commands, e.g.:
+          # az acr import --name meijeracr --source meijeracr.azurecr.io/${{ inputs.service_identifier }}:${{ inputs.image_tag }} \
+          #   --image ${{ inputs.service_identifier }}:production-stable
+          # kubectl set image deployment/${{ inputs.service_identifier }} \
+          #   app=meijeracr.azurecr.io/${{ inputs.service_identifier }}:production-stable \
+          #   -n meijer-prod
+
+      # ------------------------------------------------------------------ #
+      # Register production deployment entity and update service in Port
+      # ------------------------------------------------------------------ #
+      - name: Create production deployment entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_identifier }}-Production-${{ github.run_id }}
+          title: "${{ inputs.service_identifier }} @ ${{ inputs.image_tag }} (Production)"
+          blueprint: deployment
+          properties: |
+            {
+              "deploymentStatus": "Success",
+              "environment": "Production",
+              "createdAt": "${{ github.event.head_commit.timestamp }}"
+            }
+          relations: |
+            {
+              "service": "${{ inputs.service_identifier }}"
+            }
+
+      - name: Update service to Production in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_identifier }}
+          blueprint: service
+          properties: |
+            {
+              "lifecycle_stage": "Production",
+              "onboarding_status": "Complete"
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: SUCCESS
+          logMessage: |
+            🎉 ${{ inputs.service_identifier }}:${{ inputs.image_tag }} is LIVE in Production!
+            👤 Approved by: ${{ inputs.approved_by }}
+            📝 Release notes: ${{ inputs.release_notes }}
+            🏷️  Deployment entity registered in Port catalog
+            📊 Service lifecycle stage updated to: Production
+            🟢 Onboarding status updated to: Complete
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: FAILURE
+          logMessage: "❌ Production promotion of ${{ inputs.service_identifier }}:${{ inputs.image_tag }} failed. Check workflow logs."

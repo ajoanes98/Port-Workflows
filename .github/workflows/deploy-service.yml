@@ -1,0 +1,212 @@
+name: Deploy Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_identifier:
+        description: "Port service identifier (entity ID)"
+        required: true
+        type: string
+      environment:
+        description: "Target environment (Development, Staging, Production)"
+        required: true
+        type: string
+      image_tag:
+        description: "Docker image tag to deploy"
+        required: true
+        type: string
+        default: "latest"
+      force_deploy:
+        description: "Skip quality gate checks"
+        required: false
+        type: string
+        default: "false"
+      port_context:
+        description: "Port run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  quality-gates:
+    name: Quality & Security Gates
+    runs-on: ubuntu-latest
+    # Skip gates if force_deploy is true
+    if: ${{ inputs.force_deploy != 'true' }}
+    env:
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+    steps:
+      - name: Report gates check started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "🔍 Running quality & security gates for ${{ inputs.service_identifier }} → ${{ inputs.environment }}"
+
+      - name: Fetch service scorecard from Port
+        id: scorecard
+        run: |
+          # Get Port access token
+          TOKEN=$(curl -s -X POST https://api.getport.io/v1/auth/access_token \
+            -H "Content-Type: application/json" \
+            -d '{"clientId":"${{ secrets.PORT_CLIENT_ID }}","clientSecret":"${{ secrets.PORT_CLIENT_SECRET }}"}' \
+            | jq -r '.accessToken')
+
+          # Fetch service entity
+          ENTITY=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            "https://api.getport.io/v1/blueprints/service/entities/${{ inputs.service_identifier }}")
+
+          # Extract critical sonar vulnerabilities (mirrored from SonarQube)
+          CRITICAL_VULNS=$(echo "$ENTITY" | jq -r '.entity.properties.critical_sonar_vulnerabilities // 0')
+          SONAR_STATUS=$(echo "$ENTITY" | jq -r '.entity.relations.sonar_project // "none"')
+
+          echo "critical_vulns=$CRITICAL_VULNS" >> $GITHUB_OUTPUT
+          echo "sonar_project=$SONAR_STATUS" >> $GITHUB_OUTPUT
+          echo "Critical vulnerabilities: $CRITICAL_VULNS"
+
+      - name: Enforce zero critical vulnerabilities gate
+        run: |
+          VULNS=${{ steps.scorecard.outputs.critical_vulns }}
+          ENV="${{ inputs.environment }}"
+
+          # Only enforce for Staging and Production
+          if [[ "$ENV" == "Staging" || "$ENV" == "Production" ]]; then
+            if [ "$VULNS" -gt 0 ]; then
+              echo "❌ GATE FAILED: $VULNS critical vulnerability(ies) detected."
+              echo "Resolve all critical SonarQube vulnerabilities before deploying to $ENV."
+              exit 1
+            else
+              echo "✅ Security gate passed: 0 critical vulnerabilities."
+            fi
+          else
+            echo "ℹ️  Dev environment — security gate advisory only ($VULNS critical vulns)."
+          fi
+
+      - name: Gates passed
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "✅ All quality & security gates passed"
+
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: [quality-gates]
+    # Run if quality-gates passed OR was skipped (force_deploy)
+    if: |
+      always() &&
+      (needs.quality-gates.result == 'success' || needs.quality-gates.result == 'skipped')
+    environment:
+      name: ${{ inputs.environment }}
+    env:
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+    steps:
+      - name: Report deployment started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "🚀 Deploying ${{ inputs.service_identifier }}:${{ inputs.image_tag }} to ${{ inputs.environment }}..."
+
+      # ------------------------------------------------------------------ #
+      # Replace this step with your actual deployment mechanism:
+      # kubectl, helm, az cli, terraform apply, etc.
+      # ------------------------------------------------------------------ #
+      - name: Deploy to environment
+        run: |
+          echo "🐳 Pulling image: ${{ inputs.service_identifier }}:${{ inputs.image_tag }}"
+          echo "☁️  Deploying to: ${{ inputs.environment }}"
+          echo ""
+          echo "--- Simulated deployment steps ---"
+          echo "1. Authenticating with Azure Container Registry..."
+          echo "2. Pulling image ${{ inputs.service_identifier }}:${{ inputs.image_tag }}..."
+          echo "3. Applying Kubernetes manifests to namespace meijer-$(echo '${{ inputs.environment }}' | tr '[:upper:]' '[:lower:]')..."
+          echo "4. Waiting for rollout to complete..."
+          echo "5. Running health check..."
+          echo ""
+          echo "✅ Deployment complete."
+          # Replace with real commands, e.g.:
+          # az aks get-credentials --resource-group meijer-rg --name meijer-aks
+          # kubectl set image deployment/${{ inputs.service_identifier }} \
+          #   app=acr.azurecr.io/${{ inputs.service_identifier }}:${{ inputs.image_tag }} \
+          #   -n meijer-$(echo "${{ inputs.environment }}" | tr '[:upper:]' '[:lower:]')
+          # kubectl rollout status deployment/${{ inputs.service_identifier }}
+
+      # ------------------------------------------------------------------ #
+      # Register deployment entity in Port catalog
+      # ------------------------------------------------------------------ #
+      - name: Create deployment entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_identifier }}-${{ inputs.environment }}-${{ github.run_id }}
+          title: "${{ inputs.service_identifier }} @ ${{ inputs.image_tag }}"
+          blueprint: deployment
+          properties: |
+            {
+              "deploymentStatus": "Success",
+              "environment": "${{ inputs.environment }}",
+              "createdAt": "${{ github.event.head_commit.timestamp }}"
+            }
+          relations: |
+            {
+              "service": "${{ inputs.service_identifier }}"
+            }
+
+      - name: Update service lifecycle stage in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_identifier }}
+          blueprint: service
+          properties: |
+            {
+              "lifecycle_stage": "${{ inputs.environment }}"
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Successfully deployed ${{ inputs.service_identifier }}:${{ inputs.image_tag }} to ${{ inputs.environment }}
+            🏷️  Deployment entity registered in Port catalog
+            📊 Service lifecycle stage updated to: ${{ inputs.environment }}
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: FAILURE
+          logMessage: "❌ Deployment of ${{ inputs.service_identifier }}:${{ inputs.image_tag }} to ${{ inputs.environment }} failed. Check workflow logs."

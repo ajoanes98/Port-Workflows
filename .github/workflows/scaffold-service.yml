@@ -1,0 +1,245 @@
+name: Scaffold New Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: "Name of the new service (kebab-case)"
+        required: true
+        type: string
+      service_description:
+        description: "Short description of the service"
+        required: false
+        type: string
+      backend_framework:
+        description: "Backend framework (.NET Web API, Node.js, etc.)"
+        required: true
+        type: string
+      frontend_framework:
+        description: "Frontend framework (Node.js, React, None, etc.)"
+        required: false
+        type: string
+        default: "None"
+      database:
+        description: "Primary database (Cosmos DB, PostgreSQL, etc.)"
+        required: true
+        type: string
+      primary_cloud:
+        description: "Primary cloud provider"
+        required: true
+        type: string
+        default: "Azure"
+      secondary_cloud:
+        description: "Secondary cloud provider for DR"
+        required: false
+        type: string
+        default: "GCP"
+      criticality:
+        description: "Service criticality level"
+        required: true
+        type: string
+        default: "medium"
+      containerize:
+        description: "Add Dockerfile and container scanning"
+        required: false
+        type: string
+        default: "true"
+      enable_sonarqube:
+        description: "Enable SonarQube SAST scanning"
+        required: false
+        type: string
+        default: "true"
+      port_context:
+        description: "Port run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  scaffold:
+    name: Scaffold Service Repository
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+    steps:
+      # ------------------------------------------------------------------ #
+      # 1. Notify Port — run started
+      # ------------------------------------------------------------------ #
+      - name: Report run started to Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "🚀 Starting scaffold for service: ${{ inputs.service_name }}"
+
+      # ------------------------------------------------------------------ #
+      # 2. Create the new GitHub repo from the skeleton template
+      # ------------------------------------------------------------------ #
+      - name: Create GitHub repository from template
+        id: create_repo
+        run: |
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/ajoanes98/service-template/generate \
+            -d '{
+              "owner": "ajoanes98",
+              "name": "${{ inputs.service_name }}",
+              "description": "${{ inputs.service_description }}",
+              "private": false,
+              "include_all_branches": false
+            }')
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+
+          if [ "$HTTP_CODE" -eq 201 ]; then
+            REPO_URL=$(echo "$BODY" | jq -r '.html_url')
+            CLONE_URL=$(echo "$BODY" | jq -r '.clone_url')
+            echo "repo_url=$REPO_URL" >> $GITHUB_OUTPUT
+            echo "clone_url=$CLONE_URL" >> $GITHUB_OUTPUT
+            echo "✅ Repository created: $REPO_URL"
+          else
+            echo "❌ Failed to create repository. HTTP $HTTP_CODE"
+            echo "$BODY"
+            exit 1
+          fi
+
+      - name: Report repo created to Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "📦 Repository created: ${{ steps.create_repo.outputs.repo_url }}"
+
+      # ------------------------------------------------------------------ #
+      # 3. Checkout the new repo and apply configuration
+      # ------------------------------------------------------------------ #
+      - name: Checkout new repository
+        uses: actions/checkout@v4
+        with:
+          repository: ajoanes98/${{ inputs.service_name }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: new-service
+
+      - name: Apply service configuration
+        working-directory: new-service
+        run: |
+          # Substitute placeholders in template files
+          find . -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.json" -o -name "*.md" -o -name "*.tf" \) | while read f; do
+            sed -i \
+              -e 's/{{SERVICE_NAME}}/${{ inputs.service_name }}/g' \
+              -e 's/{{BACKEND_FRAMEWORK}}/${{ inputs.backend_framework }}/g' \
+              -e 's/{{FRONTEND_FRAMEWORK}}/${{ inputs.frontend_framework }}/g' \
+              -e 's/{{DATABASE}}/${{ inputs.database }}/g' \
+              -e 's/{{PRIMARY_CLOUD}}/${{ inputs.primary_cloud }}/g' \
+              -e 's/{{SECONDARY_CLOUD}}/${{ inputs.secondary_cloud }}/g' \
+              -e 's/{{CRITICALITY}}/${{ inputs.criticality }}/g' \
+              "$f"
+          done
+
+          # Enable/disable Dockerfile based on input
+          if [ "${{ inputs.containerize }}" != "true" ]; then
+            rm -f Dockerfile .dockerignore
+            echo "🐳 Dockerfile removed (containerize=false)"
+          fi
+
+          # Enable/disable SonarQube job in CI
+          if [ "${{ inputs.enable_sonarqube }}" != "true" ]; then
+            # Remove sonarqube job from the CI workflow
+            python3 - <<'EOF'
+          import yaml, os
+          ci_path = ".github/workflows/ci.yml"
+          if os.path.exists(ci_path):
+              with open(ci_path) as f:
+                  ci = yaml.safe_load(f)
+              if "jobs" in ci and "sonarqube" in ci["jobs"]:
+                  del ci["jobs"]["sonarqube"]
+                  with open(ci_path, "w") as f:
+                      yaml.dump(ci, f, default_flow_style=False)
+                  print("SonarQube job removed from CI")
+          EOF
+          fi
+
+      - name: Commit and push configuration
+        working-directory: new-service
+        run: |
+          git config user.name "Port Platform Bot"
+          git config user.email "platform-bot@meijer.com"
+          git add -A
+          git commit -m "chore: apply golden path configuration for ${{ inputs.service_name }}
+
+          Backend: ${{ inputs.backend_framework }}
+          Frontend: ${{ inputs.frontend_framework }}
+          Database: ${{ inputs.database }}
+          Cloud: ${{ inputs.primary_cloud }} (DR: ${{ inputs.secondary_cloud }})
+          Containerized: ${{ inputs.containerize }}
+          SonarQube: ${{ inputs.enable_sonarqube }}"
+          git push
+
+      # ------------------------------------------------------------------ #
+      # 4. Register the service entity in Port catalog
+      # ------------------------------------------------------------------ #
+      - name: Upsert service entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_name }}
+          title: ${{ inputs.service_name }}
+          blueprint: service
+          properties: |
+            {
+              "backend_framework": "${{ inputs.backend_framework }}",
+              "frontend_framework": "${{ inputs.frontend_framework }}",
+              "database": "${{ inputs.database }}",
+              "primary_cloud": "${{ inputs.primary_cloud }}",
+              "secondary_cloud": "${{ inputs.secondary_cloud }}",
+              "criticality": "${{ inputs.criticality }}",
+              "containerized": ${{ inputs.containerize }},
+              "lifecycle_stage": "Development",
+              "onboarding_status": "In Progress"
+            }
+
+      # ------------------------------------------------------------------ #
+      # 5. Final Port status report
+      # ------------------------------------------------------------------ #
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Service '${{ inputs.service_name }}' scaffolded successfully!
+            📦 Repository: ${{ steps.create_repo.outputs.repo_url }}
+            🔧 Stack: ${{ inputs.backend_framework }} + ${{ inputs.database }}
+            ☁️  Cloud: ${{ inputs.primary_cloud }} (DR: ${{ inputs.secondary_cloud }})
+            🔒 SonarQube: ${{ inputs.enable_sonarqube }} | 🐳 Docker: ${{ inputs.containerize }}
+            Service is now registered in the Port catalog with status: In Progress
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: FAILURE
+          logMessage: "❌ Scaffold failed for '${{ inputs.service_name }}'. Check workflow logs for details."
