@@ -51,7 +51,7 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ env.RUN_ID }}
           logMessage: "🚀 Starting service creation for '${{ inputs.service_name }}'..."
-          status: IN_PROGRESS
+        #  status: IN_PROGRESS
 
       # ── 2. Checkout the repo ─────────────────────────────────────────────
       - name: Checkout repository
