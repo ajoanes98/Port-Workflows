@@ -31,6 +31,10 @@ on:
         description: 'Port trigger context (JSON)'
         required: true
         type: string
+      run_id:
+        description: 'Port run ID'
+        required: false
+        type: string
 
 jobs:
   create-service:
@@ -42,17 +46,30 @@ jobs:
       # ── 0. Extract all inputs from Port context at runtime ────────────────
       - name: Extract Port context
         id: ctx
+        env:
+          IN_SERVICE_NAME: ${{ inputs.service_name }}
+          IN_FRONTEND: ${{ inputs.frontend }}
+          IN_BACKEND: ${{ inputs.backend }}
+          IN_DATABASE_TYPE: ${{ inputs.database_type }}
+          IN_CONTAINERIZATION: ${{ inputs.containerization }}
+          IN_TERRAFORM_TEMPLATE: ${{ inputs.terraform_template }}
+          IN_PORT_CONTEXT: ${{ inputs.port_context }}
+          IN_RUN_ID: ${{ inputs.run_id }}
         run: |
-          # Port sends inputs as direct workflow inputs; strip literal "null" strings
-          to_value() { local v="$1"; [ "$v" = "null" ] && echo "" || echo "$v"; }
+          # Strip literal "null" strings Port sends when a value is empty
+          strip_null() { [ "$1" = "null" ] && echo "" || echo "$1"; }
 
-          echo "service_name=$(to_value '${{ inputs.service_name }}')"         >> $GITHUB_OUTPUT
-          echo "frontend=$(to_value '${{ inputs.frontend }}')"                 >> $GITHUB_OUTPUT
-          echo "backend=$(to_value '${{ inputs.backend }}')"                   >> $GITHUB_OUTPUT
-          echo "database_type=$(to_value '${{ inputs.database_type }}')"       >> $GITHUB_OUTPUT
-          echo "containerization=$(to_value '${{ inputs.containerization }}')" >> $GITHUB_OUTPUT
-          echo "terraform_template=$(to_value '${{ inputs.terraform_template }}')" >> $GITHUB_OUTPUT
-          echo "run_id=$(echo '${{ inputs.port_context }}' | jq -r '.runId // empty')" >> $GITHUB_OUTPUT
+          echo "service_name=$(strip_null "$IN_SERVICE_NAME")"               >> $GITHUB_OUTPUT
+          echo "frontend=$(strip_null "$IN_FRONTEND")"                       >> $GITHUB_OUTPUT
+          echo "backend=$(strip_null "$IN_BACKEND")"                         >> $GITHUB_OUTPUT
+          echo "database_type=$(strip_null "$IN_DATABASE_TYPE")"             >> $GITHUB_OUTPUT
+          echo "containerization=$(strip_null "$IN_CONTAINERIZATION")"       >> $GITHUB_OUTPUT
+          echo "terraform_template=$(strip_null "$IN_TERRAFORM_TEMPLATE")"   >> $GITHUB_OUTPUT
+          RUN_ID="$IN_RUN_ID"
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            RUN_ID="$(echo "$IN_PORT_CONTEXT" | jq -r '.runId // .run.id // empty')"
+          fi
+          echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
 
           echo "--- Extracted values ---"
           cat $GITHUB_OUTPUT
