@@ -40,24 +40,51 @@ jobs:
     steps:
 
       # ── 0. Extract all inputs from Port context at runtime ────────────────
+      - name: Dump raw inputs for debugging
+        run: |
+          echo "=== All GitHub inputs ==="
+          echo "port_context raw: '${{ inputs.port_context }}'"
+          echo "service_name raw: '${{ inputs.service_name }}'"
+          echo "frontend raw:     '${{ inputs.frontend }}'"
+          echo "backend raw:      '${{ inputs.backend }}'"
+
       - name: Extract Port context
         id: ctx
         env:
           PORT_CONTEXT: ${{ inputs.port_context }}
+          DIRECT_SERVICE_NAME: ${{ inputs.service_name }}
+          DIRECT_FRONTEND: ${{ inputs.frontend }}
+          DIRECT_BACKEND: ${{ inputs.backend }}
+          DIRECT_DB: ${{ inputs.database_type }}
+          DIRECT_CONTAINER: ${{ inputs.containerization }}
+          DIRECT_TF: ${{ inputs.terraform_template }}
         run: |
-          echo "service_name=$(echo "$PORT_CONTEXT"       | jq -r '.inputs.service_name       // empty')" >> $GITHUB_OUTPUT
-          echo "frontend=$(echo "$PORT_CONTEXT"           | jq -r '.inputs.frontend           // empty')" >> $GITHUB_OUTPUT
-          echo "backend=$(echo "$PORT_CONTEXT"            | jq -r '.inputs.backend            // empty')" >> $GITHUB_OUTPUT
-          echo "database_type=$(echo "$PORT_CONTEXT"      | jq -r '.inputs.database_type      // empty')" >> $GITHUB_OUTPUT
-          echo "containerization=$(echo "$PORT_CONTEXT"   | jq -r '.inputs.containerization   // empty')" >> $GITHUB_OUTPUT
-          echo "terraform_template=$(echo "$PORT_CONTEXT" | jq -r '.inputs.terraform_template // empty')" >> $GITHUB_OUTPUT
-          echo "run_id=$(echo "$PORT_CONTEXT"             | jq -r '.runId                     // empty')" >> $GITHUB_OUTPUT
-          echo "--- Extracted values ---"
-          echo "service_name:       $(echo "$PORT_CONTEXT" | jq -r '.inputs.service_name')"
-          echo "frontend:           $(echo "$PORT_CONTEXT" | jq -r '.inputs.frontend')"
-          echo "backend:            $(echo "$PORT_CONTEXT" | jq -r '.inputs.backend')"
-          echo "terraform_template: $(echo "$PORT_CONTEXT" | jq -r '.inputs.terraform_template')"
-          echo "run_id:             $(echo "$PORT_CONTEXT" | jq -r '.runId')"
+          # Try direct inputs first, fall back to parsing port_context
+          if [ -n "$DIRECT_SERVICE_NAME" ]; then
+            echo "Using direct workflow inputs"
+            echo "service_name=$DIRECT_SERVICE_NAME"           >> $GITHUB_OUTPUT
+            echo "frontend=$DIRECT_FRONTEND"                   >> $GITHUB_OUTPUT
+            echo "backend=$DIRECT_BACKEND"                     >> $GITHUB_OUTPUT
+            echo "database_type=$DIRECT_DB"                    >> $GITHUB_OUTPUT
+            echo "containerization=$DIRECT_CONTAINER"          >> $GITHUB_OUTPUT
+            echo "terraform_template=$DIRECT_TF"               >> $GITHUB_OUTPUT
+            echo "run_id=$(echo "$PORT_CONTEXT" | jq -r '.runId // empty')" >> $GITHUB_OUTPUT
+          elif [ -n "$PORT_CONTEXT" ] && [ "$PORT_CONTEXT" != "null" ]; then
+            echo "Using port_context inputs"
+            echo "service_name=$(echo "$PORT_CONTEXT"       | jq -r '.inputs.service_name       // empty')" >> $GITHUB_OUTPUT
+            echo "frontend=$(echo "$PORT_CONTEXT"           | jq -r '.inputs.frontend           // empty')" >> $GITHUB_OUTPUT
+            echo "backend=$(echo "$PORT_CONTEXT"            | jq -r '.inputs.backend            // empty')" >> $GITHUB_OUTPUT
+            echo "database_type=$(echo "$PORT_CONTEXT"      | jq -r '.inputs.database_type      // empty')" >> $GITHUB_OUTPUT
+            echo "containerization=$(echo "$PORT_CONTEXT"   | jq -r '.inputs.containerization   // empty')" >> $GITHUB_OUTPUT
+            echo "terraform_template=$(echo "$PORT_CONTEXT" | jq -r '.inputs.terraform_template // empty')" >> $GITHUB_OUTPUT
+            echo "run_id=$(echo "$PORT_CONTEXT"             | jq -r '.runId                     // empty')" >> $GITHUB_OUTPUT
+          else
+            echo "ERROR: No inputs found in either direct inputs or port_context"
+            echo "PORT_CONTEXT value: $PORT_CONTEXT"
+            exit 1
+          fi
+          echo "--- Final extracted values ---"
+          cat $GITHUB_OUTPUT
 
       # ── 1. Report start to Port ───────────────────────────────────────────
       - name: Notify Port — In Progress
