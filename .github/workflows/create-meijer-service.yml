@@ -32,15 +32,6 @@ on:
         required: true
         type: string
 
-env:
-  SERVICE_NAME: ${{ fromJson(inputs.port_context).inputs.service_name }}
-  FRONTEND: ${{ fromJson(inputs.port_context).inputs.frontend }}
-  BACKEND: ${{ fromJson(inputs.port_context).inputs.backend }}
-  DATABASE_TYPE: ${{ fromJson(inputs.port_context).inputs.database_type }}
-  CONTAINERIZATION: ${{ fromJson(inputs.port_context).inputs.containerization }}
-  TERRAFORM_TEMPLATE: ${{ fromJson(inputs.port_context).inputs.terraform_template }}
-  RUN_ID: ${{ fromJson(inputs.port_context).runId }}
-
 jobs:
   create-service:
     runs-on: ubuntu-latest
@@ -48,7 +39,27 @@ jobs:
       contents: write
     steps:
 
-      # ── 1. Report "In Progress" to Port ──────────────────────────────────
+      # ── 0. Extract all inputs from Port context at runtime ────────────────
+      - name: Extract Port context
+        id: ctx
+        env:
+          PORT_CONTEXT: ${{ inputs.port_context }}
+        run: |
+          echo "service_name=$(echo "$PORT_CONTEXT"       | jq -r '.inputs.service_name       // empty')" >> $GITHUB_OUTPUT
+          echo "frontend=$(echo "$PORT_CONTEXT"           | jq -r '.inputs.frontend           // empty')" >> $GITHUB_OUTPUT
+          echo "backend=$(echo "$PORT_CONTEXT"            | jq -r '.inputs.backend            // empty')" >> $GITHUB_OUTPUT
+          echo "database_type=$(echo "$PORT_CONTEXT"      | jq -r '.inputs.database_type      // empty')" >> $GITHUB_OUTPUT
+          echo "containerization=$(echo "$PORT_CONTEXT"   | jq -r '.inputs.containerization   // empty')" >> $GITHUB_OUTPUT
+          echo "terraform_template=$(echo "$PORT_CONTEXT" | jq -r '.inputs.terraform_template // empty')" >> $GITHUB_OUTPUT
+          echo "run_id=$(echo "$PORT_CONTEXT"             | jq -r '.runId                     // empty')" >> $GITHUB_OUTPUT
+          echo "--- Extracted values ---"
+          echo "service_name:       $(echo "$PORT_CONTEXT" | jq -r '.inputs.service_name')"
+          echo "frontend:           $(echo "$PORT_CONTEXT" | jq -r '.inputs.frontend')"
+          echo "backend:            $(echo "$PORT_CONTEXT" | jq -r '.inputs.backend')"
+          echo "terraform_template: $(echo "$PORT_CONTEXT" | jq -r '.inputs.terraform_template')"
+          echo "run_id:             $(echo "$PORT_CONTEXT" | jq -r '.runId')"
+
+      # ── 1. Report start to Port ───────────────────────────────────────────
       - name: Notify Port — In Progress
         uses: port-labs/port-github-action@v1
         with:
@@ -56,191 +67,146 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.port.io
           operation: PATCH_RUN
-          runId: ${{ env.RUN_ID }}
-          logMessage: "🚀 Starting service creation for '${{ env.SERVICE_NAME }}'..."
+          runId: ${{ steps.ctx.outputs.run_id }}
+          logMessage: "Starting service creation for '${{ steps.ctx.outputs.service_name }}'..."
           # status: IN_PROGRESS  # Port only accepts SUCCESS or FAILURE
 
-      # ── 2. Checkout the repo ─────────────────────────────────────────────
+      # ── 2. Checkout the repo ──────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
-      # ── DEBUG: Print all inputs ──────────────────────────────────────────
-      - name: Debug inputs
-        run: |
-          echo "=== Raw inputs ==="
-          echo "service_name:      '${{ env.SERVICE_NAME }}'"
-          echo "frontend:          '${{ env.FRONTEND }}'"
-          echo "backend:           '${{ env.BACKEND }}'"
-          echo "terraform_template:'${{ env.TERRAFORM_TEMPLATE }}'"
-          echo "=== Port context ==="
-          echo '${{ inputs.port_context }}' | python3 -m json.tool || echo "(not valid JSON)"
-
-      # ── 3. Set up tooling based on backend choice ─────────────────────────
+      # ── 3. Set up tooling based on backend ───────────────────────────────
       - name: Set up Python
-        if: ${{ inputs.backend == 'Python' }}
+        if: steps.ctx.outputs.backend == 'Python'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
       - name: Set up .NET
-        if: ${{ inputs.backend == '.NET Web API' }}
+        if: steps.ctx.outputs.backend == '.NET Web API'
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
       - name: Set up Java
-        if: ${{ inputs.backend == 'Java' }}
+        if: steps.ctx.outputs.backend == 'Java'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      # ── 4. Scaffold the service directory structure ───────────────────────
+      # ── 4. Scaffold service directory ─────────────────────────────────────
       - name: Scaffold service
+        env:
+          SVC: ${{ steps.ctx.outputs.service_name }}
+          FRONTEND: ${{ steps.ctx.outputs.frontend }}
+          BACKEND: ${{ steps.ctx.outputs.backend }}
+          DB: ${{ steps.ctx.outputs.database_type }}
+          CONTAINER: ${{ steps.ctx.outputs.containerization }}
+          TF_TEMPLATE: ${{ steps.ctx.outputs.terraform_template }}
         run: |
-          SERVICE_DIR="services/${{ env.SERVICE_NAME }}"
-          mkdir -p "$SERVICE_DIR"/{src,tests,infra}
-
-          cat > "$SERVICE_DIR/README.md" <<EOF
-          # ${{ env.SERVICE_NAME }}
+          mkdir -p "services/${SVC}"/{src,tests,infra}
+          cat > "services/${SVC}/README.md" << EOF
+          # ${SVC}
 
           | Property | Value |
           |---|---|
-          | **Frontend** | ${{ env.FRONTEND }} |
-          | **Backend** | ${{ env.BACKEND }} |
-          | **Database** | ${{ env.DATABASE_TYPE }} |
-          | **Containerization** | ${{ env.CONTAINERIZATION }} |
-          | **Terraform Template** | ${{ env.TERRAFORM_TEMPLATE }} |
+          | **Frontend** | ${FRONTEND} |
+          | **Backend** | ${BACKEND} |
+          | **Database** | ${DB} |
+          | **Containerization** | ${CONTAINER} |
+          | **Terraform Template** | ${TF_TEMPLATE} |
 
           > Generated by Port self-service action.
           EOF
+          echo "Scaffolded services/${SVC}"
 
-          echo "✅ Scaffolded $SERVICE_DIR"
-
-      # ── 5. Generate Dockerfile / Kubernetes manifest ──────────────────────
+      # ── 5. Generate container config ──────────────────────────────────────
       - name: Generate container config
+        env:
+          SVC: ${{ steps.ctx.outputs.service_name }}
+          BACKEND: ${{ steps.ctx.outputs.backend }}
+          CONTAINER: ${{ steps.ctx.outputs.containerization }}
         run: |
-          SERVICE_DIR="services/${{ env.SERVICE_NAME }}"
-
-          # ── Resolve base Docker image by backend ──
-          case "${{ env.BACKEND }}" in
-            "Python")       BASE_IMAGE="python:3.12-slim";    CMD='["python", "main.py"]' ;;
-            ".NET Web API") BASE_IMAGE="mcr.microsoft.com/dotnet/aspnet:8.0"; CMD='["dotnet", "app.dll"]' ;;
-            "Java")         BASE_IMAGE="eclipse-temurin:21-jre-alpine"; CMD='["java", "-jar", "app.jar"]' ;;
-            *)              BASE_IMAGE="ubuntu:24.04";        CMD='["/bin/sh"]' ;;
+          case "$BACKEND" in
+            "Python")       BASE_IMAGE="python:3.12-slim"                      ; CMD='["python", "main.py"]' ;;
+            ".NET Web API") BASE_IMAGE="mcr.microsoft.com/dotnet/aspnet:8.0"   ; CMD='["dotnet", "app.dll"]' ;;
+            "Java")         BASE_IMAGE="eclipse-temurin:21-jre-alpine"         ; CMD='["java", "-jar", "app.jar"]' ;;
+            *)              BASE_IMAGE="ubuntu:24.04"                          ; CMD='["/bin/sh"]' ;;
           esac
 
-          if [ "${{ env.CONTAINERIZATION }}" == "Docker" ] || [ "${{ env.CONTAINERIZATION }}" == "Podman" ]; then
-            cat > "$SERVICE_DIR/Dockerfile" <<EOF
-          FROM $BASE_IMAGE
-          WORKDIR /app
-          COPY src/ .
-          EXPOSE 8080
-          CMD $CMD
-          EOF
-            echo "✅ Dockerfile generated (base: $BASE_IMAGE)"
+          if [ "$CONTAINER" = "Docker" ] || [ "$CONTAINER" = "Podman" ]; then
+            printf 'FROM %s\nWORKDIR /app\nCOPY src/ .\nEXPOSE 8080\nCMD %s\n' \
+              "$BASE_IMAGE" "$CMD" > "services/${SVC}/Dockerfile"
+            echo "Dockerfile generated (base: $BASE_IMAGE)"
           fi
 
-          if [ "${{ env.CONTAINERIZATION }}" == "Kubernetes" ]; then
-            cat > "$SERVICE_DIR/infra/deployment.yaml" <<EOF
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: ${{ env.SERVICE_NAME }}
-            labels:
-              app: ${{ env.SERVICE_NAME }}
-          spec:
-            replicas: 2
-            selector:
-              matchLabels:
-                app: ${{ env.SERVICE_NAME }}
-            template:
-              metadata:
-                labels:
-                  app: ${{ env.SERVICE_NAME }}
-              spec:
-                containers:
-                  - name: ${{ env.SERVICE_NAME }}
-                    image: ${{ env.SERVICE_NAME }}:latest
-                    ports:
-                      - containerPort: 8080
-                    resources:
-                      requests:
-                        cpu: "100m"
-                        memory: "128Mi"
-                      limits:
-                        cpu: "500m"
-                        memory: "512Mi"
-          ---
-          apiVersion: v1
-          kind: Service
-          metadata:
-            name: ${{ env.SERVICE_NAME }}
-          spec:
-            selector:
-              app: ${{ env.SERVICE_NAME }}
-            ports:
-              - port: 80
-                targetPort: 8080
-            type: ClusterIP
-          EOF
-            echo "✅ Kubernetes manifests generated"
+          if [ "$CONTAINER" = "Kubernetes" ]; then
+            mkdir -p "services/${SVC}/infra"
+            printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: %s\n  labels:\n    app: %s\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: %s\n  template:\n    metadata:\n      labels:\n        app: %s\n    spec:\n      containers:\n        - name: %s\n          image: %s:latest\n          ports:\n            - containerPort: 8080\n          resources:\n            requests:\n              cpu: "100m"\n              memory: "128Mi"\n            limits:\n              cpu: "500m"\n              memory: "512Mi"\n' \
+              "$SVC" "$SVC" "$SVC" "$SVC" "$SVC" "$SVC" > "services/${SVC}/infra/deployment.yaml"
+            printf '---\napiVersion: v1\nkind: Service\nmetadata:\n  name: %s\nspec:\n  selector:\n    app: %s\n  ports:\n    - port: 80\n      targetPort: 8080\n  type: ClusterIP\n' \
+              "$SVC" "$SVC" >> "services/${SVC}/infra/deployment.yaml"
+            echo "Kubernetes manifests generated"
           fi
 
-      # ── 6. Generate Terraform config inline ─────────────────────────────────
-      - name: Generate Terraform config from template
+      # ── 6. Generate Terraform config ──────────────────────────────────────
+      - name: Generate Terraform config
         env:
-          TEMPLATE_ID: ${{ env.TERRAFORM_TEMPLATE }}
-          SERVICE_NAME: ${{ env.SERVICE_NAME }}
+          SVC: ${{ steps.ctx.outputs.service_name }}
+          TF_TEMPLATE: ${{ steps.ctx.outputs.terraform_template }}
         run: |
-          SERVICE_INFRA="services/${SERVICE_NAME}/infra/terraform"
-          mkdir -p "$SERVICE_INFRA"
+          INFRA="services/${SVC}/infra/terraform"
+          mkdir -p "$INFRA"
 
-          if [[ "$TEMPLATE_ID" == aws-* ]]; then
-            CLOUD="AWS"
-            printf 'terraform {\n  required_version = ">=1.3.0"\n  required_providers {\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n  }\n}\nprovider "aws" { region = var.aws_region }\n' > "$SERVICE_INFRA/main.tf"
-            printf 'variable "aws_region"             { type = string; default = "us-east-1" }\nvariable "environment"            { type = string; default = "dev" }\nvariable "team"                   { type = string; default = "platform" }\nvariable "port_entity_identifier" { type = string; default = "" }\n' > "$SERVICE_INFRA/variables.tf"
-          elif [[ "$TEMPLATE_ID" == azure-* ]]; then
-            CLOUD="Azure"
-            printf 'terraform {\n  required_version = ">=1.3.0"\n  required_providers {\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.90" }\n  }\n}\nprovider "azurerm" { features {} }\n' > "$SERVICE_INFRA/main.tf"
-            printf 'variable "location"               { type = string; default = "eastus" }\nvariable "environment"            { type = string; default = "dev" }\nvariable "team"                   { type = string; default = "platform" }\nvariable "port_entity_identifier" { type = string; default = "" }\n' > "$SERVICE_INFRA/variables.tf"
+          if [[ "$TF_TEMPLATE" == aws-* ]]; then
+            printf 'terraform {\n  required_version = ">=1.3.0"\n  required_providers {\n    aws = { source = "hashicorp/aws", version = "~> 5.0" }\n  }\n}\nprovider "aws" { region = var.aws_region }\n' > "$INFRA/main.tf"
+            printf 'variable "aws_region"             { type = string; default = "us-east-1" }\nvariable "environment"            { type = string; default = "dev" }\nvariable "team"                   { type = string; default = "platform" }\nvariable "port_entity_identifier" { type = string; default = "" }\n' > "$INFRA/variables.tf"
+            echo "Generated AWS Terraform config"
+          elif [[ "$TF_TEMPLATE" == azure-* ]]; then
+            printf 'terraform {\n  required_version = ">=1.3.0"\n  required_providers {\n    azurerm = { source = "hashicorp/azurerm", version = "~> 3.90" }\n  }\n}\nprovider "azurerm" { features {} }\n' > "$INFRA/main.tf"
+            printf 'variable "location"               { type = string; default = "eastus" }\nvariable "environment"            { type = string; default = "dev" }\nvariable "team"                   { type = string; default = "platform" }\nvariable "port_entity_identifier" { type = string; default = "" }\n' > "$INFRA/variables.tf"
+            echo "Generated Azure Terraform config"
           else
-            CLOUD="Unknown"
-            printf '# Placeholder — unknown template: %s\n' "$TEMPLATE_ID" > "$SERVICE_INFRA/main.tf"
+            printf '# Unknown template: %s\n' "$TF_TEMPLATE" > "$INFRA/main.tf"
+            echo "Unknown template '$TF_TEMPLATE' — created placeholder"
           fi
 
-          printf 'environment            = "dev"\nteam                   = "platform"\nport_entity_identifier = "%s"\n' "$SERVICE_NAME" > "$SERVICE_INFRA/service.auto.tfvars"
-          echo "✅ Terraform config generated for template '$TEMPLATE_ID' ($CLOUD)"
+          printf 'environment            = "dev"\nteam                   = "platform"\nport_entity_identifier = "%s"\n' "$SVC" > "$INFRA/service.auto.tfvars"
 
+      # ── 7. Terraform init & validate ──────────────────────────────────────
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
 
       - name: Terraform Init & Validate
-        working-directory: services/${{ env.SERVICE_NAME }}/infra/terraform
+        env:
+          SVC: ${{ steps.ctx.outputs.service_name }}
+        working-directory: services/${{ steps.ctx.outputs.service_name }}/infra/terraform
         run: |
           terraform init -backend=false
           terraform validate
         continue-on-error: true
 
-      # ── 7. Commit & push the scaffolded service ───────────────────────────
+      # ── 8. Commit & push ──────────────────────────────────────────────────
       - name: Commit and push
+        env:
+          SVC: ${{ steps.ctx.outputs.service_name }}
+          FRONTEND: ${{ steps.ctx.outputs.frontend }}
+          BACKEND: ${{ steps.ctx.outputs.backend }}
+          DB: ${{ steps.ctx.outputs.database_type }}
+          CONTAINER: ${{ steps.ctx.outputs.containerization }}
+          TF_TEMPLATE: ${{ steps.ctx.outputs.terraform_template }}
         run: |
           git config user.name  "port-bot"
           git config user.email "port-bot@getport.io"
-          git checkout -b "service/${{ env.SERVICE_NAME }}"
-          git add services/${{ env.SERVICE_NAME }}
-          git commit -m "feat: scaffold service ${{ env.SERVICE_NAME }} via Port
+          git checkout -b "service/${SVC}"
+          git add "services/${SVC}"
+          git commit -m "feat: scaffold ${SVC} via Port" \
+            -m "Frontend: ${FRONTEND} | Backend: ${BACKEND} | DB: ${DB} | Container: ${CONTAINER} | TF: ${TF_TEMPLATE}"
+          git push origin "service/${SVC}"
+          echo "Branch pushed: service/${SVC}"
 
-          - Frontend:  ${{ env.FRONTEND }}
-          - Backend:   ${{ env.BACKEND }}
-          - Database:  ${{ env.DATABASE_TYPE }}
-          - Container: ${{ env.CONTAINERIZATION }}
-          - Terraform: ${{ env.TERRAFORM_TEMPLATE }}"
-          git push origin "service/${{ env.SERVICE_NAME }}"
-          echo "✅ Branch pushed: service/${{ env.SERVICE_NAME }}"
-
-      # ── 8. Register the new Service entity in Port ────────────────────────
+      # ── 9. Register Service entity in Port ────────────────────────────────
       - name: Register Service entity in Port
         uses: port-labs/port-github-action@v1
         with:
@@ -248,22 +214,21 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.port.io
           operation: UPSERT
-          identifier: ${{ env.SERVICE_NAME }}
-          title: ${{ env.SERVICE_NAME }}
+          identifier: ${{ steps.ctx.outputs.service_name }}
+          title: ${{ steps.ctx.outputs.service_name }}
           blueprint: service
           properties: |
             {
-              "frontend": "${{ env.FRONTEND }}",
-              "backend": "${{ env.BACKEND }}",
-              "database_type": "${{ env.DATABASE_TYPE }}",
-              "containerization": "${{ env.CONTAINERIZATION }}"
+              "frontend": "${{ steps.ctx.outputs.frontend }}",
+              "backend": "${{ steps.ctx.outputs.backend }}",
+              "database_type": "${{ steps.ctx.outputs.database_type }}",
+              "containerization": "${{ steps.ctx.outputs.containerization }}"
             }
-          relations: |
-            {
-              "terraform_template": "${{ env.TERRAFORM_TEMPLATE }}"
-            }
+          # Uncomment once a 'terraform_template' relation exists on the 'service' blueprint:
+          # relations: |
+          #   { "terraform_template": "${{ steps.ctx.outputs.terraform_template }}" }
 
-      # ── 9. Report success to Port ─────────────────────────────────────────
+      # ── 10. Notify Port — Success ─────────────────────────────────────────
       - name: Notify Port — Success
         if: success()
         uses: port-labs/port-github-action@v1
@@ -272,11 +237,11 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.port.io
           operation: PATCH_RUN
-          runId: ${{ env.RUN_ID }}
-          logMessage: "✅ Service '${{ env.SERVICE_NAME }}' created successfully! Branch: service/${{ env.SERVICE_NAME }}"
+          runId: ${{ steps.ctx.outputs.run_id }}
+          logMessage: "Service '${{ steps.ctx.outputs.service_name }}' created! Branch: service/${{ steps.ctx.outputs.service_name }}"
           status: SUCCESS
 
-      # ── 10. Report failure to Port ────────────────────────────────────────
+      # ── 11. Notify Port — Failure ─────────────────────────────────────────
       - name: Notify Port — Failure
         if: failure()
         uses: port-labs/port-github-action@v1
@@ -285,6 +250,6 @@ jobs:
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.port.io
           operation: PATCH_RUN
-          runId: ${{ env.RUN_ID }}
-          logMessage: "❌ Failed to create service '${{ env.SERVICE_NAME }}'. Check the workflow logs."
+          runId: ${{ steps.ctx.outputs.run_id }}
+          logMessage: "Failed to create service '${{ steps.ctx.outputs.service_name }}'. Check workflow logs."
           status: FAILURE
