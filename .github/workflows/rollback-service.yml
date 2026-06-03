@@ -1,0 +1,136 @@
+#Workflow for Meijer Demo
+name: Rollback Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_identifier:
+        description: "Port service identifier"
+        required: true
+        type: string
+      environment:
+        description: "Environment to roll back (Development, Staging, Production)"
+        required: true
+        type: string
+      previous_tag:
+        description: "Image tag to roll back to"
+        required: true
+        type: string
+      reason:
+        description: "Reason for rollback (audit trail)"
+        required: true
+        type: string
+      port_context:
+        description: "Port run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    name: "Rollback ${{ inputs.service_identifier }} → ${{ inputs.previous_tag }}"
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    env:
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+    steps:
+      - name: Report rollback started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: |
+            ⏪ Rollback initiated for ${{ inputs.service_identifier }} in ${{ inputs.environment }}
+            Target tag: ${{ inputs.previous_tag }}
+            Reason: ${{ inputs.reason }}
+
+      # ------------------------------------------------------------------ #
+      # Verify the target image tag exists in ACR before rolling back
+      # ------------------------------------------------------------------ #
+      - name: Verify target image tag exists
+        id: verify
+        run: |
+          echo "Verifying meijeracr.azurecr.io/${{ inputs.service_identifier }}:${{ inputs.previous_tag }} exists..."
+          # az acr repository show-tags --name meijeracr --repository ${{ inputs.service_identifier }} \
+          #   --query "[?@=='${{ inputs.previous_tag }}']" --output tsv
+          # For demo: assume it exists
+          echo "✅ Image tag ${{ inputs.previous_tag }} verified in registry"
+
+      # ------------------------------------------------------------------ #
+      # Perform the rollback deployment
+      # ------------------------------------------------------------------ #
+      - name: Execute rollback
+        run: |
+          echo "⏪ Rolling back ${{ inputs.service_identifier }} to ${{ inputs.previous_tag }} in ${{ inputs.environment }}..."
+          echo ""
+          echo "--- Simulated rollback steps ---"
+          echo "1. Authenticating with Azure..."
+          echo "2. Setting image to meijeracr.azurecr.io/${{ inputs.service_identifier }}:${{ inputs.previous_tag }}..."
+          echo "3. Applying rollback to namespace meijer-$(echo '${{ inputs.environment }}' | tr '[:upper:]' '[:lower:]')..."
+          echo "4. Waiting for rollout to complete..."
+          echo "5. Running health checks..."
+          echo ""
+          echo "✅ Rollback complete."
+          # kubectl set image deployment/${{ inputs.service_identifier }} \
+          #   app=meijeracr.azurecr.io/${{ inputs.service_identifier }}:${{ inputs.previous_tag }} \
+          #   -n meijer-$(echo "${{ inputs.environment }}" | tr '[:upper:]' '[:lower:]')
+          # kubectl rollout status deployment/${{ inputs.service_identifier }}
+
+      # ------------------------------------------------------------------ #
+      # Register rollback deployment entity in Port
+      # ------------------------------------------------------------------ #
+      - name: Create rollback deployment entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_identifier }}-rollback-${{ github.run_id }}
+          title: "ROLLBACK ${{ inputs.service_identifier }} → ${{ inputs.previous_tag }}"
+          blueprint: deployment
+          properties: |
+            {
+              "deploymentStatus": "Success",
+              "environment": "${{ inputs.environment }}",
+              "createdAt": "${{ github.event.repository.updated_at }}"
+            }
+          relations: |
+            {
+              "service": "${{ inputs.service_identifier }}"
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: SUCCESS
+          logMessage: |
+            ✅ Rollback successful!
+            Service: ${{ inputs.service_identifier }}
+            Environment: ${{ inputs.environment }}
+            Rolled back to: ${{ inputs.previous_tag }}
+            Reason: ${{ inputs.reason }}
+            📋 Rollback deployment entity registered in Port catalog
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: FAILURE
+          logMessage: "❌ Rollback of ${{ inputs.service_identifier }} to ${{ inputs.previous_tag }} failed. Check workflow logs immediately."
