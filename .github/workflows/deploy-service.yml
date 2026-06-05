@@ -185,6 +185,29 @@ jobs:
               "lifecycle_stage": "${{ inputs.environment }}"
             }
 
+      # ------------------------------------------------------------------ #
+      # Upsert workload entity — links service to environment after deploy
+      # ------------------------------------------------------------------ #
+      - name: Upsert workload entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.getport.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_identifier }}-${{ inputs.environment }}-workload
+          title: "${{ inputs.service_identifier }} (${{ inputs.environment }})"
+          blueprint: workload
+          properties: |
+            {
+              "version": "${{ inputs.image_tag }}"
+            }
+          relations: |
+            {
+              "service": "${{ inputs.service_identifier }}",
+              "environment": "${{ inputs.environment == 'Development' && 'dev' || inputs.environment == 'Staging' && 'staging' || 'production' }}"
+            }
+
       - name: Report success to Port
         if: success()
         uses: port-labs/port-github-action@v1
@@ -199,6 +222,7 @@ jobs:
             ✅ Successfully deployed ${{ inputs.service_identifier }}:${{ inputs.image_tag }} to ${{ inputs.environment }}
             🏷️  Deployment entity registered in Port catalog
             📊 Service lifecycle stage updated to: ${{ inputs.environment }}
+            🔗 Workload entity upserted: ${{ inputs.service_identifier }} (${{ inputs.environment }})
 
       - name: Report failure to Port
         if: failure()
