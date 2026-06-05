@@ -1,4 +1,5 @@
 #workflow for Meijer Demo
+#workflow for Meijer Demo
 name: Scaffold New Service
 
 on:
@@ -12,17 +13,21 @@ on:
         description: "Short description of the service"
         required: false
         type: string
+      service_type:
+        description: "Service type (Internal, Mobile App, Web App)"
+        required: true
+        type: string
       backend_framework:
-        description: "Backend framework (.NET Web API, Node.js, etc.)"
+        description: "Backend .NET version"
         required: true
         type: string
       frontend_framework:
-        description: "Frontend framework (Node.js, React, None, etc.)"
+        description: "Frontend Node.js version"
         required: false
         type: string
         default: "None"
       database:
-        description: "Primary database (Cosmos DB, PostgreSQL, etc.)"
+        description: "Primary database"
         required: true
         type: string
       primary_cloud:
@@ -35,16 +40,6 @@ on:
         required: false
         type: string
         default: "GCP"
-      criticality:
-        description: "Service criticality level"
-        required: true
-        type: string
-        default: "medium"
-      containerize:
-        description: "Add Dockerfile and container scanning"
-        required: false
-        type: string
-        default: "true"
       enable_sonarqube:
         description: "Enable SonarQube SAST scanning"
         required: false
@@ -138,24 +133,17 @@ jobs:
           find . -type f \( -name "*.yml" -o -name "*.yaml" -o -name "*.json" -o -name "*.md" -o -name "*.tf" \) | while read f; do
             sed -i \
               -e 's/{{SERVICE_NAME}}/${{ inputs.service_name }}/g' \
+              -e 's/{{SERVICE_TYPE}}/${{ inputs.service_type }}/g' \
               -e 's/{{BACKEND_FRAMEWORK}}/${{ inputs.backend_framework }}/g' \
               -e 's/{{FRONTEND_FRAMEWORK}}/${{ inputs.frontend_framework }}/g' \
               -e 's/{{DATABASE}}/${{ inputs.database }}/g' \
               -e 's/{{PRIMARY_CLOUD}}/${{ inputs.primary_cloud }}/g' \
               -e 's/{{SECONDARY_CLOUD}}/${{ inputs.secondary_cloud }}/g' \
-              -e 's/{{CRITICALITY}}/${{ inputs.criticality }}/g' \
               "$f"
           done
 
-          # Enable/disable Dockerfile based on input
-          if [ "${{ inputs.containerize }}" != "true" ]; then
-            rm -f Dockerfile .dockerignore
-            echo "🐳 Dockerfile removed (containerize=false)"
-          fi
-
           # Enable/disable SonarQube job in CI
           if [ "${{ inputs.enable_sonarqube }}" != "true" ]; then
-            # Remove sonarqube job from the CI workflow
             python3 - <<'EOF'
           import yaml, os
           ci_path = ".github/workflows/ci.yml"
@@ -178,11 +166,12 @@ jobs:
           git add -A
           git commit -m "chore: apply golden path configuration for ${{ inputs.service_name }}
 
+          Service Type: ${{ inputs.service_type }}
           Backend: ${{ inputs.backend_framework }}
           Frontend: ${{ inputs.frontend_framework }}
           Database: ${{ inputs.database }}
           Cloud: ${{ inputs.primary_cloud }} (DR: ${{ inputs.secondary_cloud }})
-          Containerized: ${{ inputs.containerize }}
+          Containerized: true
           SonarQube: ${{ inputs.enable_sonarqube }}"
           git push
 
@@ -201,13 +190,13 @@ jobs:
           blueprint: service
           properties: |
             {
+              "service_type": "${{ inputs.service_type }}",
               "backend_framework": "${{ inputs.backend_framework }}",
               "frontend_framework": "${{ inputs.frontend_framework }}",
               "database": "${{ inputs.database }}",
               "primary_cloud": "${{ inputs.primary_cloud }}",
               "secondary_cloud": "${{ inputs.secondary_cloud }}",
-              "criticality": "${{ inputs.criticality }}",
-              "containerized": ${{ inputs.containerize }},
+              "containerized": true,
               "lifecycle_stage": "Development",
               "onboarding_status": "In Progress"
             }
@@ -228,9 +217,10 @@ jobs:
           logMessage: |
             ✅ Service '${{ inputs.service_name }}' scaffolded successfully!
             📦 Repository: ${{ steps.create_repo.outputs.repo_url }}
+            🏷️  Type: ${{ inputs.service_type }}
             🔧 Stack: ${{ inputs.backend_framework }} + ${{ inputs.database }}
             ☁️  Cloud: ${{ inputs.primary_cloud }} (DR: ${{ inputs.secondary_cloud }})
-            🔒 SonarQube: ${{ inputs.enable_sonarqube }} | 🐳 Docker: ${{ inputs.containerize }}
+            🔒 SonarQube: ${{ inputs.enable_sonarqube }} | 🐳 Docker: true
             Service is now registered in the Port catalog with status: In Progress
 
       - name: Report failure to Port
