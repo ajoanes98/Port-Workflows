@@ -205,7 +205,7 @@ jobs:
           relations: |
             {
               "service": "${{ inputs.service_identifier }}",
-              "environment": "${{ inputs.environment == 'Development' && 'dev' || inputs.environment == 'Staging' && 'staging' || 'production' }}"
+              "environment": "${{ inputs.environment == 'Development' && 'dev' || inputs.environment == 'Staging' && 'staging' || inputs.environment == 'QA' && 'qa' || 'production' }}"
             }
 
       - name: Report success to Port
