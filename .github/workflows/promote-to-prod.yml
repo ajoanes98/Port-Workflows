@@ -4,8 +4,12 @@ name: Promote to Production
 on:
   workflow_dispatch:
     inputs:
+      workload_identifier:
+        description: "Port workload identifier (e.g. meijer-inventory-api-Staging-workload)"
+        required: true
+        type: string
       service_identifier:
-        description: "Port service identifier (entity ID)"
+        description: "Port service identifier — resolved from the workload's service relation"
         required: true
         type: string
       image_tag:
@@ -48,7 +52,8 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: |
-            🔍 Running pre-promotion checks for ${{ inputs.service_identifier }}:${{ inputs.image_tag }}
+            🔍 Running pre-promotion checks for workload '${{ inputs.workload_identifier }}'
+            Service: ${{ inputs.service_identifier }} | Image: ${{ inputs.image_tag }}
             👤 Approved by: ${{ inputs.approved_by }}
 
       - name: Run promotion validation checks
@@ -60,7 +65,7 @@ jobs:
             -d '{"clientId":"${{ secrets.PORT_CLIENT_ID }}","clientSecret":"${{ secrets.PORT_CLIENT_SECRET }}"}' \
             | jq -r '.accessToken')
 
-          # Fetch service entity
+          # Fetch service entity using service_identifier (resolved from workload relation)
           ENTITY=$(curl -s \
             -H "Authorization: Bearer $TOKEN" \
             "https://api.getport.io/v1/blueprints/service/entities/${{ inputs.service_identifier }}")
@@ -68,21 +73,24 @@ jobs:
           # Check critical vulnerabilities
           CRITICAL_VULNS=$(echo "$ENTITY" | jq -r '.entity.properties.critical_sonar_vulnerabilities // 0')
           SONAR_GATE=$(echo "$ENTITY" | jq -r '.entity.properties.last_sonar_analysis // "unknown"')
-          LIFECYCLE=$(echo "$ENTITY" | jq -r '.entity.properties.lifecycle_stage // "unknown"')
+
+          # Verify the workload being promoted is in Staging (not Dev)
+          WORKLOAD=$(curl -s \
+            -H "Authorization: Bearer $TOKEN" \
+            "https://api.getport.io/v1/blueprints/workload/entities/${{ inputs.workload_identifier }}")
+          WORKLOAD_ENV=$(echo "$WORKLOAD" | jq -r '.entity.relations.environment // "unknown"')
 
           echo "critical_vulns=$CRITICAL_VULNS" >> $GITHUB_OUTPUT
           echo "sonar_quality_gate=$SONAR_GATE" >> $GITHUB_OUTPUT
 
-          # Verify service is currently in Staging
-          if [ "$LIFECYCLE" == "Staging" ]; then
+          if [[ "$WORKLOAD_ENV" == "staging" ]]; then
             echo "staging_deployment_exists=true" >> $GITHUB_OUTPUT
           else
             echo "staging_deployment_exists=false" >> $GITHUB_OUTPUT
           fi
 
           echo "Critical vulnerabilities: $CRITICAL_VULNS"
-          echo "Sonar last analysis: $SONAR_GATE"
-          echo "Current lifecycle stage: $LIFECYCLE"
+          echo "Workload environment: $WORKLOAD_ENV"
 
       - name: Enforce promotion gates
         run: |
@@ -144,7 +152,7 @@ jobs:
           baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
-          logMessage: "🚀 Promoting ${{ inputs.service_identifier }}:${{ inputs.image_tag }} to Production..."
+          logMessage: "🚀 Promoting workload '${{ inputs.workload_identifier }}' (${{ inputs.service_identifier }}:${{ inputs.image_tag }}) to Production..."
 
       # ------------------------------------------------------------------ #
       # Replace this step with your actual production deployment mechanism
@@ -174,28 +182,27 @@ jobs:
       # ------------------------------------------------------------------ #
       # Register production deployment entity and update service in Port
       # ------------------------------------------------------------------ #
-      - name: Create production deployment entity in Port
+      - name: Create production workload entity in Port
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
           baseUrl: https://api.getport.io
           operation: UPSERT
-          identifier: ${{ inputs.service_identifier }}-Production-${{ github.run_id }}
-          title: "${{ inputs.service_identifier }} @ ${{ inputs.image_tag }} (Production)"
-          blueprint: deployment
+          identifier: ${{ inputs.service_identifier }}-production-workload
+          title: "${{ inputs.service_identifier }} (Production)"
+          blueprint: workload
           properties: |
             {
-              "deploymentStatus": "Success",
-              "environment": "Production",
-              "createdAt": "${{ github.event.head_commit.timestamp }}"
+              "version": "${{ inputs.image_tag }}"
             }
           relations: |
             {
-              "service": "${{ inputs.service_identifier }}"
+              "service": "${{ inputs.service_identifier }}",
+              "environment": "production"
             }
 
-      - name: Update service to Production in Port
+      - name: Update service lifecycle to Production in Port
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
@@ -221,10 +228,11 @@ jobs:
           runId: ${{ inputs.port_context }}
           status: SUCCESS
           logMessage: |
-            🎉 ${{ inputs.service_identifier }}:${{ inputs.image_tag }} is LIVE in Production!
+            🎉 Workload '${{ inputs.workload_identifier }}' is LIVE in Production!
+            Service: ${{ inputs.service_identifier }} | Image: ${{ inputs.image_tag }}
             👤 Approved by: ${{ inputs.approved_by }}
             📝 Release notes: ${{ inputs.release_notes }}
-            🏷️  Deployment entity registered in Port catalog
+            🏷️  Production workload entity created in Port catalog
             📊 Service lifecycle stage updated to: Production
             🟢 Onboarding status updated to: Complete
 
@@ -238,4 +246,4 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: FAILURE
-          logMessage: "❌ Production promotion of ${{ inputs.service_identifier }}:${{ inputs.image_tag }} failed. Check workflow logs."
+          logMessage: "❌ Production promotion of workload '${{ inputs.workload_identifier }}' (${{ inputs.service_identifier }}:${{ inputs.image_tag }}) failed. Check workflow logs."
