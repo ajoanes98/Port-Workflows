@@ -23,7 +23,7 @@ on:
         type: string
       frontend_framework:
         description: "Frontend Node.js version"
-        required: false
+        required: true
         type: string
         default: "None"
       database:
