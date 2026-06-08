@@ -1,5 +1,4 @@
 #workflow for Meijer Demo
-#workflow for Meijer Demo
 name: Scaffold New Service
 
 on:
@@ -200,9 +199,61 @@ jobs:
               "lifecycle_stage": "Development",
               "onboarding_status": "In Progress"
             }
-
+            
       # ------------------------------------------------------------------ #
-      # 5. Final Port status report
+      # 5. Create Dynatrace entity and Dev workload in Port catalog
+      # ------------------------------------------------------------------ #
+      - name: Create Dynatrace entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: UPSERT
+          identifier: dt-entity-${{ inputs.service_name }}
+          title: ${{ inputs.service_name }}
+          blueprint: dynatraceEntity
+          properties: |
+            {
+              "firstSeen": "${{ github.event.repository.updated_at }}",
+              "lastSeen": "${{ github.event.repository.updated_at }}",
+              "tags": ["meijer", "${{ inputs.service_name }}", "development", "${{ inputs.primary_cloud }}", "${{ inputs.service_type }}"],
+              "type": "SERVICE"
+            }
+            
+      - name: Report Dynatrace monitoring enabled to Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "📊 Dynatrace monitoring enabled for '${{ inputs.service_name }}' — entity dt-entity-${{ inputs.service_name }} registered in Port catalog"
+
+      - name: Create Dev workload in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_name }}-dev-workload
+          title: "${{ inputs.service_name }} (Development)"
+          blueprint: workload
+          properties: |
+            {
+              "version": "initial"
+            }
+          relations: |
+            {
+              "service": "${{ inputs.service_name }}",
+              "environment": "dev",
+              "dynatrace_entity": "dt-entity-${{ inputs.service_name }}"
+            }
+            
+      # ------------------------------------------------------------------ #
+      # 6. Final Port status report
       # ------------------------------------------------------------------ #
       - name: Report success to Port
         if: success()
