@@ -43,7 +43,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          https://api.us.port.io: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "🔍 Running quality & security gates for ${{ inputs.service_identifier }} → ${{ inputs.environment }}"
@@ -52,7 +52,7 @@ jobs:
         id: scorecard
         run: |
           # Get Port access token
-          TOKEN=$(curl -s -X POST https://api.getport.io/v1/auth/access_token \
+          TOKEN=$(curl -s -X POST https://api.us.port.io/v1/auth/access_token \
             -H "Content-Type: application/json" \
             -d '{"clientId":"${{ secrets.PORT_CLIENT_ID }}","clientSecret":"${{ secrets.PORT_CLIENT_SECRET }}"}' \
             | jq -r '.accessToken')
@@ -60,7 +60,7 @@ jobs:
           # Fetch service entity
           ENTITY=$(curl -s \
             -H "Authorization: Bearer $TOKEN" \
-            "https://api.getport.io/v1/blueprints/service/entities/${{ inputs.service_identifier }}")
+            "https://api.us.port.io/v1/blueprints/service/entities/${{ inputs.service_identifier }}")
 
           # Extract critical sonar vulnerabilities (mirrored from SonarQube)
           CRITICAL_VULNS=$(echo "$ENTITY" | jq -r '.entity.properties.critical_sonar_vulnerabilities // 0')
@@ -93,7 +93,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "✅ All quality & security gates passed"
@@ -118,7 +118,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "🚀 Deploying ${{ inputs.service_identifier }}:${{ inputs.image_tag }} to ${{ inputs.environment }}..."
@@ -155,7 +155,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}-${{ inputs.environment }}-${{ github.run_id }}
           title: "${{ inputs.service_identifier }} @ ${{ inputs.image_tag }}"
@@ -176,7 +176,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}
           blueprint: service
@@ -193,7 +193,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}-${{ inputs.environment }}-workload
           title: "${{ inputs.service_identifier }} (${{ inputs.environment }})"
@@ -214,7 +214,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: SUCCESS
@@ -230,7 +230,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: FAILURE
