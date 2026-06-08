@@ -38,9 +38,7 @@ jobs:
       PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
 
     outputs:
-      critical_vulns: ${{ steps.checks.outputs.critical_vulns }}
-      sonar_quality_gate: ${{ steps.checks.outputs.sonar_quality_gate }}
-      staging_deployment_exists: ${{ steps.checks.outputs.staging_deployment_exists }}
+      workload_env: ${{ steps.checks.outputs.workload_env }}
 
     steps:
       - name: Report checks started
@@ -48,74 +46,142 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: |
             🔍 Running pre-promotion checks for workload '${{ inputs.workload_identifier }}'
             Service: ${{ inputs.service_identifier }} | Image: ${{ inputs.image_tag }}
             👤 Approved by: ${{ inputs.approved_by }}
+            📊 Enforcing workload scorecard gates:
+               • Security & Compliance (Service) ≥ Silver
+               • Quality Maturity (Service) ≥ Bronze
+               • Production Readiness (Service) ≥ Bronze
 
       - name: Run promotion validation checks
         id: checks
         run: |
+          set -euo pipefail
+
           # Get Port access token
-          TOKEN=$(curl -s -X POST https://api.getport.io/v1/auth/access_token \
+          TOKEN=$(curl -s -X POST https://api.us.port.io/v1/auth/access_token \
             -H "Content-Type: application/json" \
             -d '{"clientId":"${{ secrets.PORT_CLIENT_ID }}","clientSecret":"${{ secrets.PORT_CLIENT_SECRET }}"}' \
             | jq -r '.accessToken')
 
-          # Fetch service entity using service_identifier (resolved from workload relation)
-          ENTITY=$(curl -s \
+          # Fetch workload via search so scorecard results are included in the response
+          SEARCH_BODY=$(jq -n \
+            --arg id "${{ inputs.workload_identifier }}" \
+            '{
+              query: {
+                combinator: "and",
+                rules: [
+                  { operator: "=", property: "$identifier", value: $id }
+                ]
+              }
+            }')
+
+          WORKLOAD_RESPONSE=$(curl -s -X POST \
             -H "Authorization: Bearer $TOKEN" \
-            "https://api.getport.io/v1/blueprints/service/entities/${{ inputs.service_identifier }}")
+            -H "Content-Type: application/json" \
+            -d "$SEARCH_BODY" \
+            "https://api.us.port.io/v1/blueprints/workload/entities/search")
 
-          # Check critical vulnerabilities
-          CRITICAL_VULNS=$(echo "$ENTITY" | jq -r '.entity.properties.critical_sonar_vulnerabilities // 0')
-          SONAR_GATE=$(echo "$ENTITY" | jq -r '.entity.properties.last_sonar_analysis // "unknown"')
-
-          # Verify the workload being promoted is in Staging (not Dev)
-          WORKLOAD=$(curl -s \
-            -H "Authorization: Bearer $TOKEN" \
-            "https://api.getport.io/v1/blueprints/workload/entities/${{ inputs.workload_identifier }}")
-          WORKLOAD_ENV=$(echo "$WORKLOAD" | jq -r '.entity.relations.environment // "unknown"')
-
-          echo "critical_vulns=$CRITICAL_VULNS" >> $GITHUB_OUTPUT
-          echo "sonar_quality_gate=$SONAR_GATE" >> $GITHUB_OUTPUT
-
-          if [[ "$WORKLOAD_ENV" == "staging" ]]; then
-            echo "staging_deployment_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "staging_deployment_exists=false" >> $GITHUB_OUTPUT
+          ENTITY_COUNT=$(echo "$WORKLOAD_RESPONSE" | jq '.entities | length')
+          if [ "$ENTITY_COUNT" -eq 0 ]; then
+            echo "❌ Workload '${{ inputs.workload_identifier }}' was not found in Port"
+            exit 1
           fi
 
-          echo "Critical vulnerabilities: $CRITICAL_VULNS"
+          # Verify the workload being promoted is in Staging (not Dev)
+          WORKLOAD_ENV=$(echo "$WORKLOAD_RESPONSE" | jq -r '.entities[0].relations.environment // "unknown"')
+          echo "$WORKLOAD_RESPONSE" | jq '.entities[0].scorecards // {}' > /tmp/workload-scorecards.json
+
+          echo "workload_env=$WORKLOAD_ENV" >> $GITHUB_OUTPUT
+
           echo "Workload environment: $WORKLOAD_ENV"
+          echo "Scorecard snapshot:"
+          cat /tmp/workload-scorecards.json | jq '.'
 
       - name: Enforce promotion gates
         run: |
-          VULNS=${{ steps.checks.outputs.critical_vulns }}
-          STAGING=${{ steps.checks.outputs.staging_deployment_exists }}
+          set -euo pipefail
 
+          SCORECARDS_FILE="/tmp/workload-scorecards.json"
+          WORKLOAD_ENV='${{ steps.checks.outputs.workload_env }}'
           GATE_FAILED=false
 
-          # Gate 1: Zero critical vulnerabilities
-          if [ "$VULNS" -gt 0 ]; then
-            echo "❌ GATE FAILED: $VULNS critical vulnerability(ies) detected."
-            GATE_FAILED=true
+          scorecard_level() {
+            jq -r --arg id "$1" '.[$id].level // "Basic"' "$SCORECARDS_FILE"
+          }
+
+          scorecard_rank() {
+            case "$1" in
+              Basic) echo 0 ;;
+              Maturing) echo 1 ;;
+              Bronze) echo 2 ;;
+              Silver) echo 3 ;;
+              Gold) echo 4 ;;
+              *) echo 0 ;;
+            esac
+          }
+
+          meets_minimum() {
+            local current="$1"
+            local minimum="$2"
+            [ "$(scorecard_rank "$current")" -ge "$(scorecard_rank "$minimum")" ]
+          }
+
+          print_failed_rules() {
+            local scorecard_id="$1"
+            jq -r --arg id "$scorecard_id" '
+              .[$id].rules[]? | select(.status == "FAILURE" or .status == "Not passed") | "      - \(.title // .identifier)"' \
+              "$SCORECARDS_FILE"
+          }
+
+          check_scorecard_gate() {
+            local scorecard_id="$1"
+            local scorecard_title="$2"
+            local minimum_level="$3"
+            local current_level
+            current_level=$(scorecard_level "$scorecard_id")
+
+            echo ""
+            echo "📋 $scorecard_title"
+            echo "   Required: ≥ $minimum_level | Current: $current_level"
+
+            if meets_minimum "$current_level" "$minimum_level"; then
+              echo "   ✅ Passed"
+            else
+              echo "   ❌ GATE FAILED: scorecard level is below $minimum_level"
+              FAILED_RULES=$(print_failed_rules "$scorecard_id")
+              if [ -n "$FAILED_RULES" ]; then
+                echo "   Failed rules:"
+                echo "$FAILED_RULES"
+              fi
+              GATE_FAILED=true
+            fi
+          }
+
+          # Gate 1: Must be deployed to Staging first
+          echo "=== Gate 1: Staging workload ==="
+          if [[ "$WORKLOAD_ENV" == "staging" ]]; then
+            echo "✅ Staging gate: Workload is linked to the staging environment"
           else
-            echo "✅ Security gate: 0 critical vulnerabilities"
+            echo "❌ GATE FAILED: Service must be deployed to Staging before promoting to Production (current: $WORKLOAD_ENV)."
+            GATE_FAILED=true
           fi
 
-          # Gate 2: Must be deployed to Staging first
-          if [ "$STAGING" != "true" ]; then
-            echo "❌ GATE FAILED: Service must be deployed to Staging before promoting to Production."
-            GATE_FAILED=true
-          else
-            echo "✅ Staging gate: Service has a Staging deployment"
-          fi
+          # Gate 2: Workload scorecards (mirrored from backing service)
+          echo ""
+          echo "=== Gate 2: Workload scorecards ==="
+          check_scorecard_gate "workload_security_maturity" "Security & Compliance (Service)" "Silver"
+          check_scorecard_gate "workload_quality_maturity" "Quality Maturity (Service)" "Bronze"
+          check_scorecard_gate "workload_production_readiness" "Production Readiness (Service)" "Bronze"
 
           if [ "$GATE_FAILED" = true ]; then
+            echo ""
+            echo "❌ Promotion blocked — resolve failing scorecard rules on the workload in Port, then retry."
             exit 1
           fi
 
@@ -127,10 +193,10 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
-          logMessage: "✅ Pre-promotion checks passed. Proceeding to production deployment."
+          logMessage: "✅ Pre-promotion scorecard gates passed. Proceeding to production deployment."
 
   promote:
     name: Promote to Production
@@ -149,7 +215,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "🚀 Promoting workload '${{ inputs.workload_identifier }}' (${{ inputs.service_identifier }}:${{ inputs.image_tag }}) to Production..."
@@ -187,7 +253,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}-production-workload
           title: "${{ inputs.service_identifier }} (Production)"
@@ -207,7 +273,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}
           blueprint: service
@@ -223,7 +289,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: SUCCESS
@@ -242,7 +308,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: FAILURE
