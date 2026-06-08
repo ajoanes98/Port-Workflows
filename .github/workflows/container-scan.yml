@@ -32,7 +32,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "🔍 Starting Trivy scan for ${{ inputs.service_identifier }}:${{ inputs.image_tag }}..."
@@ -106,7 +106,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}-scan-${{ inputs.image_tag }}
           title: "${{ inputs.service_identifier }} — ${{ inputs.image_tag }} Scan"
@@ -136,7 +136,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: SUCCESS
@@ -152,7 +152,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: FAILURE
