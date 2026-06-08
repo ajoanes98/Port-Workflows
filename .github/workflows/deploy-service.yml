@@ -164,7 +164,7 @@ jobs:
             {
               "deploymentStatus": "Success",
               "environment": "${{ inputs.environment }}",
-              "createdAt": "${{ github.event.head_commit.timestamp }}"
+              "createdAt": "${{ github.run_started_at }}"
             }
           relations: |
             {
