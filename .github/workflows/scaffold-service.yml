@@ -68,7 +68,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "🚀 Starting scaffold for service: ${{ inputs.service_name }}"
@@ -111,7 +111,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "📦 Repository created: ${{ steps.create_repo.outputs.repo_url }}"
@@ -183,7 +183,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_name }}
           title: ${{ inputs.service_name }}
@@ -210,7 +210,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: SUCCESS
@@ -229,7 +229,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: FAILURE
