@@ -163,8 +163,7 @@ jobs:
           properties: |
             {
               "deploymentStatus": "Success",
-              "environment": "${{ inputs.environment }}",
-              # "createdAt": "${{ steps.deploy_ts.outputs.iso }}"
+              "environment": "${{ inputs.environment }}"
             }
           relations: |
             {
