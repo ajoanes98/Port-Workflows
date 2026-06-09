@@ -1,15 +1,19 @@
-#Workflow for Meijer Demo
+#workflow for Meijer Demo
 name: Rollback Service
 
 on:
   workflow_dispatch:
     inputs:
+      workload_identifier:
+        description: "Port workload identifier (e.g. meijer-inventory-api-staging-workload)"
+        required: true
+        type: string
       service_identifier:
-        description: "Port service identifier"
+        description: "Port service identifier — resolved from the workload's service relation"
         required: true
         type: string
       environment:
-        description: "Environment to roll back (Development, Staging, Production)"
+        description: "Environment to roll back (Development, Staging, Production, QA)"
         required: true
         type: string
       previous_tag:
@@ -27,7 +31,7 @@ on:
 
 jobs:
   rollback:
-    name: "Rollback ${{ inputs.service_identifier }} → ${{ inputs.previous_tag }}"
+    name: "Rollback ${{ inputs.workload_identifier }} → ${{ inputs.previous_tag }}"
     runs-on: ubuntu-latest
     environment:
       name: ${{ inputs.environment }}
@@ -41,11 +45,12 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: |
-            ⏪ Rollback initiated for ${{ inputs.service_identifier }} in ${{ inputs.environment }}
+            ⏪ Rollback initiated for workload '${{ inputs.workload_identifier }}'
+            Service: ${{ inputs.service_identifier }} | Environment: ${{ inputs.environment }}
             Target tag: ${{ inputs.previous_tag }}
             Reason: ${{ inputs.reason }}
 
@@ -89,7 +94,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}-rollback-${{ github.run_id }}
           title: "ROLLBACK ${{ inputs.service_identifier }} → ${{ inputs.previous_tag }}"
@@ -97,12 +102,28 @@ jobs:
           properties: |
             {
               "deploymentStatus": "Success",
-              "environment": "${{ inputs.environment }}",
-              "createdAt": "${{ github.event.repository.updated_at }}"
+              "environment": "${{ inputs.environment }}"
             }
           relations: |
             {
               "service": "${{ inputs.service_identifier }}"
+            }
+
+      # ------------------------------------------------------------------ #
+      # Update workload version in Port after rollback
+      # ------------------------------------------------------------------ #
+      - name: Update workload version in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: UPSERT
+          identifier: ${{ inputs.workload_identifier }}
+          blueprint: workload
+          properties: |
+            {
+              "version": "${{ inputs.previous_tag }}"
             }
 
       - name: Report success to Port
@@ -111,17 +132,18 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: SUCCESS
           logMessage: |
             ✅ Rollback successful!
-            Service: ${{ inputs.service_identifier }}
-            Environment: ${{ inputs.environment }}
+            Workload: ${{ inputs.workload_identifier }}
+            Service: ${{ inputs.service_identifier }} | Environment: ${{ inputs.environment }}
             Rolled back to: ${{ inputs.previous_tag }}
             Reason: ${{ inputs.reason }}
             📋 Rollback deployment entity registered in Port catalog
+            🏷️ Workload version updated to ${{ inputs.previous_tag }}
 
       - name: Report failure to Port
         if: failure()
@@ -129,8 +151,8 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.getport.io
+          baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: FAILURE
-          logMessage: "❌ Rollback of ${{ inputs.service_identifier }} to ${{ inputs.previous_tag }} failed. Check workflow logs immediately."
+          logMessage: "❌ Rollback of workload '${{ inputs.workload_identifier }}' (${{ inputs.service_identifier }}:${{ inputs.previous_tag }}) failed. Check workflow logs immediately."
