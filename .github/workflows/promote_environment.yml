@@ -1,0 +1,314 @@
+#Workflow for Meijer Demo
+name: Promote Workload Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      workload_identifier:
+        description: "Port workload identifier (e.g. meijer-inventory-api-Development-workload)"
+        required: true
+        type: string
+      service_identifier:
+        description: "Port service identifier — resolved from the workload's service relation"
+        required: true
+        type: string
+      image_tag:
+        description: "Image tag to promote to the target environment"
+        required: true
+        type: string
+      target_environment:
+        description: "Target non-production environment (Development, QA, or Staging)"
+        required: true
+        type: string
+      release_notes:
+        description: "Summary of changes in this release"
+        required: false
+        type: string
+      approved_by:
+        description: "Email of the user who triggered the promotion (from Port)"
+        required: false
+        type: string
+      port_context:
+        description: "Port run ID for status reporting"
+        required: true
+        type: string
+
+jobs:
+  pre-promotion-checks:
+    name: Pre-Promotion Validation
+    runs-on: ubuntu-latest
+    env:
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+    outputs:
+      workload_env: ${{ steps.checks.outputs.workload_env }}
+      target_env_lower: ${{ steps.checks.outputs.target_env_lower }}
+
+    steps:
+      - name: Report checks started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: |
+            🔍 Running pre-promotion checks for workload '${{ inputs.workload_identifier }}'
+            Service: ${{ inputs.service_identifier }} | Image: ${{ inputs.image_tag }}
+            🎯 Target environment: ${{ inputs.target_environment }}
+            👤 Triggered by: ${{ inputs.approved_by }}
+            📊 Enforcing promotion gate:
+               • Target environment must not be Production
+
+      - name: Run promotion validation checks
+        id: checks
+        run: |
+          set -euo pipefail
+
+          # Normalize target environment to lowercase for Port relation matching
+          TARGET_ENV_LOWER=$(echo "${{ inputs.target_environment }}" | tr '[:upper:]' '[:lower:]')
+          echo "target_env_lower=$TARGET_ENV_LOWER" >> $GITHUB_OUTPUT
+
+          # Get Port access token
+          TOKEN=$(curl -s -X POST https://api.us.port.io/v1/auth/access_token \
+            -H "Content-Type: application/json" \
+            -d '{"clientId":"${{ secrets.PORT_CLIENT_ID }}","clientSecret":"${{ secrets.PORT_CLIENT_SECRET }}"}' \
+            | jq -r '.accessToken')
+
+          # Fetch workload via search
+          SEARCH_BODY=$(jq -n \
+            --arg id "${{ inputs.workload_identifier }}" \
+            '{
+              query: {
+                combinator: "and",
+                rules: [
+                  { operator: "=", property: "$identifier", value: $id }
+                ]
+              }
+            }')
+
+          WORKLOAD_RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$SEARCH_BODY" \
+            "https://api.us.port.io/v1/blueprints/workload/entities/search")
+
+          REPORT_FILE="/tmp/port-gate-report.txt"
+
+          ENTITY_COUNT=$(echo "$WORKLOAD_RESPONSE" | jq '.entities | length')
+          if [ "$ENTITY_COUNT" -eq 0 ]; then
+            {
+              echo "❌ Promotion blocked — pre-promotion checks failed"
+              echo ""
+              echo "Workload '${{ inputs.workload_identifier }}' was not found in Port."
+              echo "Verify the workload identifier and try again from the workload entity page."
+            } | tee "$REPORT_FILE"
+            exit 1
+          fi
+
+          WORKLOAD_ENV=$(echo "$WORKLOAD_RESPONSE" | jq -r '.entities[0].relations.environment // "unknown"')
+          echo "workload_env=$WORKLOAD_ENV" >> $GITHUB_OUTPUT
+
+          echo "Workload current environment: $WORKLOAD_ENV"
+          echo "Target environment: $TARGET_ENV_LOWER"
+
+      - name: Enforce promotion gates
+        id: gates
+        run: |
+          set -euo pipefail
+
+          REPORT_FILE="/tmp/port-gate-report.txt"
+          TARGET_ENV_LOWER="${{ steps.checks.outputs.target_env_lower }}"
+          GATE_FAILED=false
+
+          # Gate 1: Target must not be Production
+          echo "=== Gate 1: Non-production target ==="
+          if [[ "$TARGET_ENV_LOWER" == "production" ]]; then
+            echo "❌ GATE FAILED: Target environment is Production."
+            echo "Use the 'Promote to Production' action for production deployments."
+            GATE_FAILED=true
+          else
+            echo "✅ Target environment '$TARGET_ENV_LOWER' is a valid non-production environment."
+          fi
+
+          # Gate 2: Must not be promoting to the same environment
+          echo ""
+          echo "=== Gate 2: Different source and target ==="
+          WORKLOAD_ENV="${{ steps.checks.outputs.workload_env }}"
+          if [[ "$WORKLOAD_ENV" == "$TARGET_ENV_LOWER" ]]; then
+            echo "❌ GATE FAILED: Workload is already deployed to '$TARGET_ENV_LOWER'."
+            GATE_FAILED=true
+          else
+            echo "✅ Promoting from '$WORKLOAD_ENV' → '$TARGET_ENV_LOWER'."
+          fi
+
+          if [ "$GATE_FAILED" = true ]; then
+            {
+              echo "❌ Promotion blocked — pre-promotion gates failed"
+              echo ""
+              echo "Workload: ${{ inputs.workload_identifier }}"
+              echo "Service: ${{ inputs.service_identifier }} | Image: ${{ inputs.image_tag }}"
+              echo "Target: ${{ inputs.target_environment }}"
+              echo ""
+              echo "Resolve the issues above and retry."
+            } | tee "$REPORT_FILE"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ All promotion gates passed — proceeding to environment deployment."
+
+      - name: Prepare Port failure log
+        if: failure()
+        id: failure_log
+        run: |
+          REPORT_FILE="/tmp/port-gate-report.txt"
+          {
+            echo 'message<<EOF'
+            if [ -f "$REPORT_FILE" ]; then
+              cat "$REPORT_FILE"
+            else
+              echo "❌ Pre-promotion checks failed for workload '${{ inputs.workload_identifier }}'."
+              echo "See the GitHub Actions workflow logs for full details."
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Report gate failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: FAILURE
+          logMessage: ${{ steps.failure_log.outputs.message }}
+
+      - name: Report gates passed
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "✅ Pre-promotion gates passed. Proceeding to ${{ inputs.target_environment }} deployment."
+
+  promote:
+    name: Promote to ${{ inputs.target_environment }}
+    runs-on: ubuntu-latest
+    needs: [pre-promotion-checks]
+    environment:
+      name: ${{ inputs.target_environment }}
+      url: https://meijer-internal.com
+    env:
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+    steps:
+      - name: Report promotion started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          logMessage: "🚀 Promoting workload '${{ inputs.workload_identifier }}' (${{ inputs.service_identifier }}:${{ inputs.image_tag }}) to ${{ inputs.target_environment }}..."
+
+      # ------------------------------------------------------------------ #
+      # Replace this step with your actual deployment mechanism per env
+      # ------------------------------------------------------------------ #
+      - name: Deploy to ${{ inputs.target_environment }}
+        run: |
+          TARGET="${{ inputs.target_environment }}"
+          TARGET_LOWER="${{ needs.pre-promotion-checks.outputs.target_env_lower }}"
+
+          echo "🐳 Image: ${{ inputs.service_identifier }}:${{ inputs.image_tag }}"
+          echo "☁️  Target: $TARGET (namespace: meijer-$TARGET_LOWER)"
+          echo ""
+          echo "--- Simulated $TARGET promotion steps ---"
+          echo "1. Authenticating with Azure Container Registry..."
+          echo "2. Tagging image as $TARGET_LOWER-latest..."
+          echo "3. Applying Kubernetes manifests to namespace meijer-$TARGET_LOWER..."
+          echo "4. Waiting for rollout to complete..."
+          echo "5. Running smoke tests against $TARGET environment..."
+          echo "6. Verifying health endpoints..."
+          echo ""
+          echo "✅ $TARGET promotion complete."
+          # Replace with real commands, e.g.:
+          # kubectl set image deployment/${{ inputs.service_identifier }} \
+          #   app=meijeracr.azurecr.io/${{ inputs.service_identifier }}:${{ inputs.image_tag }} \
+          #   -n meijer-$TARGET_LOWER
+
+      # ------------------------------------------------------------------ #
+      # Register workload entity in Port for the target environment
+      # ------------------------------------------------------------------ #
+      - name: Upsert workload entity in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_identifier }}-${{ needs.pre-promotion-checks.outputs.target_env_lower }}-workload
+          title: "${{ inputs.service_identifier }} (${{ inputs.target_environment }})"
+          blueprint: workload
+          properties: |
+            {
+              "version": "${{ inputs.image_tag }}"
+            }
+          relations: |
+            {
+              "service": "${{ inputs.service_identifier }}",
+              "environment": "${{ needs.pre-promotion-checks.outputs.target_env_lower }}"
+            }
+
+      - name: Update service lifecycle stage in Port
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_identifier }}
+          blueprint: service
+          properties: |
+            {
+              "lifecycle_stage": "${{ inputs.target_environment }}"
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: SUCCESS
+          logMessage: |
+            🎉 Workload '${{ inputs.workload_identifier }}' successfully promoted to ${{ inputs.target_environment }}!
+            Service: ${{ inputs.service_identifier }} | Image: ${{ inputs.image_tag }}
+            👤 Triggered by: ${{ inputs.approved_by }}
+            📝 Release notes: ${{ inputs.release_notes }}
+            🏷️  Workload entity upserted in Port catalog
+            📊 Service lifecycle stage updated to: ${{ inputs.target_environment }}
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_context }}
+          status: FAILURE
+          logMessage: "❌ Promotion of workload '${{ inputs.workload_identifier }}' (${{ inputs.service_identifier }}:${{ inputs.image_tag }}) to ${{ inputs.target_environment }} failed. Check workflow logs."
