@@ -31,85 +31,24 @@ on:
         description: Audit justification
         required: false
         type: string
-      port_workflow_run_id:
-        description: Port workflow run ID (wfr_) used to resolve the dispatch node run
-        required: false
-        type: string
 
 jobs:
   provision:
     name: Provision AI Dev Environment
     runs-on: ubuntu-latest
     env:
-      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
-      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
-      PORT_BASE_URL: https://api.us.port.io
       SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
       SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
       SPACELIFT_API_ENDPOINT: https://ajoanes98.app.us.spacelift.io/graphql
-      PORT_WORKFLOW_RUN_ID: ${{ inputs.port_workflow_run_id }}
 
     steps:
-      - name: Resolve Port dispatch node run
-        if: env.PORT_WORKFLOW_RUN_ID != ''
-        id: port
+      - name: Log provisioning request
         run: |
-          TOKEN=$(curl -fsS -X POST "$PORT_BASE_URL/v1/auth/access_token" \
-            -H "Content-Type: application/json" \
-            -d "{\"clientId\":\"$PORT_CLIENT_ID\",\"clientSecret\":\"$PORT_CLIENT_SECRET\"}" \
-            | jq -r '.accessToken')
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "Failed to obtain Port access token" >&2
-            exit 1
-          fi
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-
-          NODE_RUN_ID=""
-          for _ in $(seq 1 15); do
-            RUN_JSON=$(curl -fsS "$PORT_BASE_URL/v1/workflows/runs/$PORT_WORKFLOW_RUN_ID" \
-              -H "Authorization: Bearer $TOKEN")
-            NODE_RUN_ID=$(echo "$RUN_JSON" | jq -r --arg gh "${{ github.run_id }}" '
-              .run.nodeRuns[]
-              | select(.node.identifier == "dispatch_github")
-              | select((.externalRunId // "") | tostring | endswith($gh) or . == "")
-              | .identifier' | head -n 1)
-            if [ -n "$NODE_RUN_ID" ] && [ "$NODE_RUN_ID" != "null" ]; then
-              break
-            fi
-            sleep 2
-          done
-
-          if [ -z "$NODE_RUN_ID" ] || [ "$NODE_RUN_ID" = "null" ]; then
-            echo "Could not resolve dispatch_github node run for $PORT_WORKFLOW_RUN_ID" >&2
-            exit 1
-          fi
-
-          echo "node_run_id=$NODE_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "Resolved Port node run: $NODE_RUN_ID"
-
-      - name: Report provisioning started to Port
-        if: steps.port.outputs.node_run_id != ''
-        run: |
-          curl -fsS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/${{ steps.port.outputs.node_run_id }}/logs" \
-            -H "Authorization: Bearer ${{ steps.port.outputs.token }}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg msg "🚀 Provisioning AI dev environment for ${{ inputs.service }}" \
-              '{logs:[{level:"INFO",message:$msg}]}')"
-          curl -fsS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/${{ steps.port.outputs.node_run_id }}/logs" \
-            -H "Authorization: Bearer ${{ steps.port.outputs.token }}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg dev "${{ inputs.developer }}" \
-              --arg tools "${{ inputs.ai_tooling }}" \
-              --arg tier "${{ inputs.litellm_tier }}" \
-              --arg ttl "${{ inputs.environment_ttl }}" \
-              '{logs:[
-                {level:"INFO",message:("Developer: " + $dev)},
-                {level:"INFO",message:("AI tooling: " + $tools)},
-                {level:"INFO",message:("LiteLLM tier: " + $tier)},
-                {level:"INFO",message:("TTL: " + $ttl)}
-              ]}')"
+          echo "🚀 Provisioning AI dev environment for ${{ inputs.service }}"
+          echo "Developer: ${{ inputs.developer }}"
+          echo "AI tooling: ${{ inputs.ai_tooling }}"
+          echo "LiteLLM tier: ${{ inputs.litellm_tier }}"
+          echo "TTL: ${{ inputs.environment_ttl }}"
 
       - name: Authenticate to Spacelift
         id: spacelift
@@ -121,24 +60,10 @@ jobs:
           if [ -z "$JWT" ]; then
             echo "⚠️ Spacelift auth failed — continuing with simulated workspace ID"
             echo "workspace_id=ws-${{ inputs.service }}-simulated" >> "$GITHUB_OUTPUT"
-            echo "spacelift_status=simulated" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "workspace_id=ws-${{ inputs.service }}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
-          echo "spacelift_status=authenticated" >> "$GITHUB_OUTPUT"
           echo "✅ Spacelift authenticated"
-
-      - name: Report Spacelift status to Port
-        if: steps.port.outputs.node_run_id != ''
-        run: |
-          MSG="✅ Spacelift authenticated — workspace ${{ steps.spacelift.outputs.workspace_id }}"
-          if [ "${{ steps.spacelift.outputs.spacelift_status }}" = "simulated" ]; then
-            MSG="⚠️ Spacelift auth simulated — workspace ${{ steps.spacelift.outputs.workspace_id }}"
-          fi
-          curl -fsS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/${{ steps.port.outputs.node_run_id }}/logs" \
-            -H "Authorization: Bearer ${{ steps.port.outputs.token }}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg msg "$MSG" '{logs:[{level:"INFO",message:$msg}]}')"
 
       - name: Simulate golden-path provisioning
         run: |
@@ -148,40 +73,3 @@ jobs:
           echo "4. Setting LiteLLM quota tier: ${{ inputs.litellm_tier }}"
           sleep 3
           echo "✅ Provisioning steps complete"
-
-      - name: Report success to Port
-        if: success() && steps.port.outputs.node_run_id != ''
-        run: |
-          curl -fsS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/${{ steps.port.outputs.node_run_id }}/logs" \
-            -H "Authorization: Bearer ${{ steps.port.outputs.token }}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg ws "${{ steps.spacelift.outputs.workspace_id }}" \
-              '{logs:[
-                {level:"INFO",message:"1. Copilot seat allocated"},
-                {level:"INFO",message:("2. SpaceLift workspace: " + $ws)},
-                {level:"INFO",message:"3. Golden-path repo scaffolded"},
-                {level:"INFO",message:"4. LiteLLM quota configured"},
-                {level:"INFO",message:"✅ Golden-path provisioning complete"}
-              ]}')"
-          curl -fsS -X PATCH "$PORT_BASE_URL/v1/workflows/nodes/runs/${{ steps.port.outputs.node_run_id }}" \
-            -H "Authorization: Bearer ${{ steps.port.outputs.token }}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg link "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-              --arg ws "${{ steps.spacelift.outputs.workspace_id }}" \
-              '{status:"COMPLETED",result:"SUCCESS",links:[$link],output:{spacelift_workspace_id:$ws}}')"
-
-      - name: Report failure to Port
-        if: failure() && steps.port.outputs.node_run_id != ''
-        run: |
-          curl -fsS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/${{ steps.port.outputs.node_run_id }}/logs" \
-            -H "Authorization: Bearer ${{ steps.port.outputs.token }}" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg msg "❌ Provisioning failed for ${{ inputs.service }}" \
-              '{logs:[{level:"ERROR",message:$msg}]}')"
-          curl -fsS -X PATCH "$PORT_BASE_URL/v1/workflows/nodes/runs/${{ steps.port.outputs.node_run_id }}" \
-            -H "Authorization: Bearer ${{ steps.port.outputs.token }}" \
-            -H "Content-Type: application/json" \
-            -d '{"status":"COMPLETED","result":"FAILED"}'
