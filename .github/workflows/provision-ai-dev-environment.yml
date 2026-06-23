@@ -31,10 +31,6 @@ on:
         description: Audit justification
         required: false
         type: string
-      port_run_id:
-        description: Port workflow run ID for status reporting
-        required: true
-        type: string
       dev_environment_id:
         description: Dev environment entity identifier
         required: false
@@ -52,20 +48,13 @@ jobs:
       SPACELIFT_API_ENDPOINT: https://ajoanes98.app.us.spacelift.io/graphql
 
     steps:
-      - name: Report provisioning started
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
-          operation: PATCH_RUN
-          runId: ${{ inputs.port_run_id }}
-          logMessage: |
-            🚀 Provisioning AI dev environment for ${{ inputs.service }}
-            Developer: ${{ inputs.developer }}
-            AI tooling: ${{ inputs.ai_tooling }}
-            LiteLLM tier: ${{ inputs.litellm_tier }}
-            TTL: ${{ inputs.environment_ttl }}
+      - name: Log provisioning request
+        run: |
+          echo "🚀 Provisioning AI dev environment for ${{ inputs.service }}"
+          echo "Developer: ${{ inputs.developer }}"
+          echo "AI tooling: ${{ inputs.ai_tooling }}"
+          echo "LiteLLM tier: ${{ inputs.litellm_tier }}"
+          echo "TTL: ${{ inputs.environment_ttl }}"
 
       - name: Authenticate to Spacelift
         id: spacelift
@@ -114,29 +103,3 @@ jobs:
               "service": "${{ inputs.service }}"
             }
 
-      - name: Report success to Port
-        if: success()
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
-          operation: PATCH_RUN
-          runId: ${{ inputs.port_run_id }}
-          status: SUCCESS
-          logMessage: |
-            ✅ AI dev environment ready for ${{ inputs.service }}
-            SpaceLift workspace: ${{ steps.spacelift.outputs.workspace_id }}
-            Copilot + Claude Code enabled
-
-      - name: Report failure to Port
-        if: failure()
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
-          operation: PATCH_RUN
-          runId: ${{ inputs.port_run_id }}
-          status: FAILURE
-          logMessage: "❌ Failed to provision AI dev environment for ${{ inputs.service }}"
