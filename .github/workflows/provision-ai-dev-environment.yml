@@ -31,6 +31,10 @@ on:
         description: Audit justification
         required: false
         type: string
+      port_run_id:
+        description: Port workflow node run ID (wfnr_...)
+        required: false
+        type: string
 
 jobs:
   provision:
@@ -42,6 +46,20 @@ jobs:
       SPACELIFT_API_ENDPOINT: https://ajoanes98.app.us.spacelift.io/graphql
 
     steps:
+      - name: Report started to Port
+        if: ${{ inputs.port_run_id != '' }}
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: |
+            🚀 Provisioning AI dev environment for ${{ inputs.service }}
+            Developer: ${{ inputs.developer }}
+            LiteLLM tier: ${{ inputs.litellm_tier }}
+
       - name: Log provisioning request
         run: |
           echo "🚀 Provisioning AI dev environment for ${{ inputs.service }}"
@@ -73,3 +91,29 @@ jobs:
           echo "4. Setting LiteLLM quota tier: ${{ inputs.litellm_tier }}"
           sleep 3
           echo "✅ Provisioning steps complete"
+
+      - name: Report success to Port
+        if: ${{ success() && inputs.port_run_id != '' }}
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: |
+            ✅ AI dev environment provisioned for ${{ inputs.service }}
+            SpaceLift workspace: ${{ steps.spacelift.outputs.workspace_id }}
+
+      - name: Report failure to Port
+        if: ${{ failure() && inputs.port_run_id != '' }}
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: "❌ Failed to provision AI dev environment for ${{ inputs.service }}"
