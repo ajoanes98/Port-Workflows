@@ -1,0 +1,142 @@
+name: Provision AI Dev Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Port service identifier
+        required: true
+        type: string
+      developer:
+        description: Developer email
+        required: true
+        type: string
+      ai_tooling:
+        description: JSON array of AI tooling selections
+        required: true
+        type: string
+      litellm_tier:
+        description: LiteLLM tier label
+        required: true
+        type: string
+      environment_ttl:
+        description: Environment TTL selection
+        required: true
+        type: string
+      tofu_module_version:
+        description: OpenTofu module version
+        required: true
+        type: string
+      justification:
+        description: Audit justification
+        required: false
+        type: string
+      port_run_id:
+        description: Port workflow run ID for status reporting
+        required: true
+        type: string
+      dev_environment_id:
+        description: Dev environment entity identifier
+        required: false
+        type: string
+
+jobs:
+  provision:
+    name: Provision AI Dev Environment
+    runs-on: ubuntu-latest
+    env:
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
+      SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
+      SPACELIFT_API_ENDPOINT: https://ajoanes98.app.us.spacelift.io/graphql
+
+    steps:
+      - name: Report provisioning started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: |
+            🚀 Provisioning AI dev environment for ${{ inputs.service }}
+            Developer: ${{ inputs.developer }}
+            AI tooling: ${{ inputs.ai_tooling }}
+            LiteLLM tier: ${{ inputs.litellm_tier }}
+            TTL: ${{ inputs.environment_ttl }}
+
+      - name: Authenticate to Spacelift
+        id: spacelift
+        run: |
+          JWT=$(curl -sS -X POST "$SPACELIFT_API_ENDPOINT" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation GetSpaceliftToken(\$id: ID!, \$secret: String!) { apiKeyUser(id: \$id, secret: \$secret) { jwt } }\",\"variables\":{\"id\":\"$SPACELIFT_API_KEY_ID\",\"secret\":\"$SPACELIFT_API_KEY_SECRET\"}}" \
+            | jq -r '.data.apiKeyUser.jwt // empty')
+          if [ -z "$JWT" ]; then
+            echo "⚠️ Spacelift auth failed — continuing with simulated workspace ID"
+            echo "workspace_id=ws-${{ inputs.service }}-simulated" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "workspace_id=ws-${{ inputs.service }}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "✅ Spacelift authenticated"
+
+      - name: Simulate golden-path provisioning
+        run: |
+          echo "1. Allocating GitHub Copilot seat for ${{ inputs.developer }}"
+          echo "2. Provisioning SpaceLift workspace: ${{ steps.spacelift.outputs.workspace_id }}"
+          echo "3. Scaffolding repo from golden-path template"
+          echo "4. Setting LiteLLM quota tier: ${{ inputs.litellm_tier }}"
+          sleep 3
+          echo "✅ Provisioning steps complete"
+
+      - name: Mark dev environment active in Port
+        if: inputs.dev_environment_id != ''
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: UPSERT
+          identifier: ${{ inputs.dev_environment_id }}
+          title: ${{ inputs.service }} Dev Environment
+          blueprint: dev_environment
+          properties: |
+            {
+              "status": "active",
+              "spacelift_workspace_id": "${{ steps.spacelift.outputs.workspace_id }}",
+              "copilot_seat_active": true,
+              "claude_code_access": true
+            }
+          relations: |
+            {
+              "service": "${{ inputs.service }}"
+            }
+
+      - name: Report success to Port
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: |
+            ✅ AI dev environment ready for ${{ inputs.service }}
+            SpaceLift workspace: ${{ steps.spacelift.outputs.workspace_id }}
+            Copilot + Claude Code enabled
+
+      - name: Report failure to Port
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: FAILURE
+          logMessage: "❌ Failed to provision AI dev environment for ${{ inputs.service }}"

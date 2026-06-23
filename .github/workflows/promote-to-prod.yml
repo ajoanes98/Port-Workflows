@@ -46,7 +46,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
+          baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: |
@@ -64,7 +64,7 @@ jobs:
           set -euo pipefail
 
           # Get Port access token
-          TOKEN=$(curl -s -X POST https://api.us.port.io/v1/auth/access_token \
+          TOKEN=$(curl -s -X POST https://api.getport.io/v1/auth/access_token \
             -H "Content-Type: application/json" \
             -d '{"clientId":"${{ secrets.PORT_CLIENT_ID }}","clientSecret":"${{ secrets.PORT_CLIENT_SECRET }}"}' \
             | jq -r '.accessToken')
@@ -85,7 +85,7 @@ jobs:
             -H "Authorization: Bearer $TOKEN" \
             -H "Content-Type: application/json" \
             -d "$SEARCH_BODY" \
-            "https://api.us.port.io/v1/blueprints/workload/entities/search")
+            "https://api.getport.io/v1/blueprints/workload/entities/search")
 
           REPORT_FILE="/tmp/port-gate-report.txt"
 
@@ -235,7 +235,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
+          baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: FAILURE
@@ -247,7 +247,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
+          baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "✅ Pre-promotion scorecard gates passed. Proceeding to production deployment."
@@ -269,7 +269,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
+          baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           logMessage: "🚀 Promoting workload '${{ inputs.workload_identifier }}' (${{ inputs.service_identifier }}:${{ inputs.image_tag }}) to Production..."
@@ -307,7 +307,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
+          baseUrl: https://api.getport.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}-production-workload
           title: "${{ inputs.service_identifier }} (Production)"
@@ -322,18 +322,17 @@ jobs:
               "environment": "production"
             }
 
-      - name: Update service lifecycle to Production in Port
+      - name: Update service onboarding status in Port
         uses: port-labs/port-github-action@v1
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
+          baseUrl: https://api.getport.io
           operation: UPSERT
           identifier: ${{ inputs.service_identifier }}
           blueprint: service
           properties: |
             {
-              "lifecycle_stage": "Production",
               "onboarding_status": "Complete"
             }
 
@@ -343,7 +342,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
+          baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: SUCCESS
@@ -353,7 +352,7 @@ jobs:
             👤 Approved by: ${{ inputs.approved_by }}
             📝 Release notes: ${{ inputs.release_notes }}
             🏷️  Production workload entity created in Port catalog
-            📊 Service lifecycle stage updated to: Production
+            📊 Deployed lifecycle stage (`deployed_lifecycle_stage`) updates automatically from workload entities
             🟢 Onboarding status updated to: Complete
 
       - name: Report failure to Port
@@ -362,7 +361,7 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
+          baseUrl: https://api.getport.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_context }}
           status: FAILURE

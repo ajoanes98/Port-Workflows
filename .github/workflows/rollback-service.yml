@@ -110,21 +110,37 @@ jobs:
             }
 
       # ------------------------------------------------------------------ #
-      # Update workload version in Port after rollback
+      # Update workload version and tag history in Port after rollback
       # ------------------------------------------------------------------ #
-      - name: Update workload version in Port
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
-          operation: UPSERT
-          identifier: ${{ inputs.workload_identifier }}
-          blueprint: workload
-          properties: |
-            {
-              "version": "${{ inputs.previous_tag }}"
-            }
+      - name: Update workload version and tag history in Port
+        env:
+          WORKLOAD_IDENTIFIER: ${{ inputs.workload_identifier }}
+          PREVIOUS_TAG: ${{ inputs.previous_tag }}
+        run: |
+          TOKEN=$(curl -s -X POST "https://api.us.port.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+
+          WORKLOAD=$(curl -s "https://api.us.port.io/v1/blueprints/workload/entities/${WORKLOAD_IDENTIFIER}" \
+            -H "Authorization: Bearer ${TOKEN}")
+
+          CURRENT_VERSION=$(echo "$WORKLOAD" | jq -r '.entity.properties.version // empty')
+          UPDATED_TAGS=$(echo "$WORKLOAD" | jq -c --arg current "$CURRENT_VERSION" --arg new "$PREVIOUS_TAG" '
+            [.entity.properties.previous_tags // [] | .[]?, $current]
+            | map(select(. != null and . != "" and . != $new))
+            | unique
+            | .[0:10]
+          ')
+
+          curl -s -X POST "https://api.us.port.io/v1/blueprints/workload/entities?upsert=true&merge=true" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg id "$WORKLOAD_IDENTIFIER" \
+              --arg tag "$PREVIOUS_TAG" \
+              --argjson tags "$UPDATED_TAGS" \
+              '{identifier: $id, properties: {version: $tag, previous_tags: $tags}}')"
 
       - name: Report success to Port
         if: success()
@@ -143,7 +159,7 @@ jobs:
             Rolled back to: ${{ inputs.previous_tag }}
             Reason: ${{ inputs.reason }}
             📋 Rollback deployment entity registered in Port catalog
-            🏷️ Workload version updated to ${{ inputs.previous_tag }}
+            🏷️ Workload version updated to ${{ inputs.previous_tag }} (previous tag history preserved)
 
       - name: Report failure to Port
         if: failure()

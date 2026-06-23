@@ -1,0 +1,61 @@
+name: Request LiteLLM Quota Upgrade
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Port service identifier
+        required: true
+        type: string
+      requested_tier:
+        description: Requested LiteLLM tier
+        required: true
+        type: string
+      expected_monthly_gb:
+        description: Expected monthly GB usage
+        required: true
+        type: string
+      use_case:
+        description: Use case description
+        required: false
+        type: string
+      port_run_id:
+        description: Port workflow run ID
+        required: true
+        type: string
+
+jobs:
+  upgrade:
+    name: LiteLLM Quota Upgrade
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: |
+            🔄 Updating LiteLLM routing for ${{ inputs.service }}
+            Requested tier: ${{ inputs.requested_tier }}
+            Expected usage: ${{ inputs.expected_monthly_gb }} GB/mo
+
+      - name: Simulate gateway routing update
+        run: |
+          echo "Updating LiteLLM gateway pool for ${{ inputs.service }}"
+          sleep 2
+          echo "✅ Routing config updated"
+
+      - name: Report success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: "✅ LiteLLM quota updated for ${{ inputs.service }}"

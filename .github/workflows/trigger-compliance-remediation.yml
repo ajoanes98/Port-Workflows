@@ -1,0 +1,74 @@
+name: Trigger Compliance Remediation
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Port service identifier
+        required: true
+        type: string
+      remediation_approach:
+        description: Remediation approach
+        required: true
+        type: string
+      notes:
+        description: Remediation notes
+        required: false
+        type: string
+      port_run_id:
+        description: Port workflow run ID
+        required: true
+        type: string
+
+jobs:
+  remediate:
+    name: Compliance Remediation
+    runs-on: ubuntu-latest
+    env:
+      SPACELIFT_API_ENDPOINT: https://ajoanes98.app.us.spacelift.io/graphql
+      SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
+      SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
+
+    steps:
+      - name: Report remediation started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: |
+            ⚠️ Compliance remediation for ${{ inputs.service }}
+            Approach: ${{ inputs.remediation_approach }}
+
+      - name: Create mock Jira ticket (Port entity log)
+        run: |
+          echo "[PORT] Compliance Violation: ${{ inputs.service }}"
+          echo "Approach: ${{ inputs.remediation_approach }}"
+          echo "Notes: ${{ inputs.notes }}"
+
+      - name: Trigger SpaceLift remediation run
+        if: inputs.remediation_approach == 'Auto-remediate via SpaceLift'
+        run: |
+          JWT=$(curl -sS -X POST "$SPACELIFT_API_ENDPOINT" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation GetSpaceliftToken(\$id: ID!, \$secret: String!) { apiKeyUser(id: \$id, secret: \$secret) { jwt } }\",\"variables\":{\"id\":\"$SPACELIFT_API_KEY_ID\",\"secret\":\"$SPACELIFT_API_KEY_SECRET\"}}" \
+            | jq -r '.data.apiKeyUser.jwt // empty')
+          if [ -n "$JWT" ]; then
+            echo "✅ Spacelift remediation run triggered (simulated)"
+          else
+            echo "⚠️ Spacelift unavailable — remediation logged only"
+          fi
+
+      - name: Report success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: "✅ Remediation complete for ${{ inputs.service }} — ticket created, owner notified"

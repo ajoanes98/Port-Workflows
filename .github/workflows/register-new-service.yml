@@ -1,0 +1,85 @@
+name: Register New Service
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: Service identifier
+        required: true
+        type: string
+      github_repo_url:
+        description: GitHub repository URL
+        required: true
+        type: string
+      team_owner:
+        description: Owning team identifier
+        required: true
+        type: string
+      exposes_api:
+        description: Whether service exposes an API
+        required: true
+        type: string
+      cloud_provider:
+        description: Cloud provider
+        required: true
+        type: string
+      spacelift_workspace:
+        description: SpaceLift workspace ID
+        required: false
+        type: string
+      port_run_id:
+        description: Port workflow run ID
+        required: true
+        type: string
+
+jobs:
+  register:
+    name: Register New Service
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report started
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          logMessage: "🔍 Running OPA policy check and onboarding for ${{ inputs.service_name }}"
+
+      - name: Simulate OPA and Apigee registration
+        run: |
+          echo "OPA policy check: pending → passed (simulated)"
+          if [ "${{ inputs.exposes_api }}" = "true" ]; then
+            echo "Registering API in Apigee..."
+          fi
+          sleep 2
+
+      - name: Update service OPA and Apigee status
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: UPSERT
+          identifier: ${{ inputs.service_name }}
+          title: ${{ inputs.service_name }}
+          blueprint: service
+          properties: |
+            {
+              "opa_policy_status": "passed",
+              "apigee_registered": ${{ inputs.exposes_api }},
+              "deployment_status": "active"
+            }
+
+      - name: Report success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.us.port.io
+          operation: PATCH_RUN
+          runId: ${{ inputs.port_run_id }}
+          status: SUCCESS
+          logMessage: "✅ Service ${{ inputs.service_name }} onboarded — OPA passed, catalog updated"

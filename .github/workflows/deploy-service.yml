@@ -85,7 +85,7 @@ jobs:
               echo "✅ Security gate passed: 0 critical vulnerabilities."
             fi
           else
-            echo "ℹ️  Dev environment — security gate advisory only ($VULNS critical vulns)."
+            echo "ℹ️ Dev environment — security gate advisory only ($VULNS critical vulns)."
           fi
 
       - name: Gates passed
@@ -170,22 +170,9 @@ jobs:
               "service": "${{ inputs.service_identifier }}"
             }
 
-      - name: Update service lifecycle stage in Port
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
-          operation: UPSERT
-          identifier: ${{ inputs.service_identifier }}
-          blueprint: service
-          properties: |
-            {
-              "lifecycle_stage": "${{ inputs.environment }}"
-            }
-
       # ------------------------------------------------------------------ #
-      # Upsert workload entity — links service to environment after deploy
+      # Upsert workload entity — links service to environment after deploy.
+      # Deployed lifecycle stage is derived from workload entities in Port.
       # ------------------------------------------------------------------ #
       - name: Upsert workload entity in Port
         uses: port-labs/port-github-action@v1
@@ -219,9 +206,9 @@ jobs:
           status: SUCCESS
           logMessage: |
             ✅ Successfully deployed ${{ inputs.service_identifier }}:${{ inputs.image_tag }} to ${{ inputs.environment }}
-            🏷️  Deployment entity registered in Port catalog
-            📊 Service lifecycle stage updated to: ${{ inputs.environment }}
+            🏷️ Deployment entity registered in Port catalog
             🔗 Workload entity upserted: ${{ inputs.service_identifier }} (${{ inputs.environment }})
+            📊 Deployed lifecycle stage (`deployed_lifecycle_stage`) updates automatically from workload entities
 
       - name: Report failure to Port
         if: failure()
