@@ -31,8 +31,8 @@ on:
         description: Audit justification
         required: false
         type: string
-      dev_environment_id:
-        description: Dev environment entity identifier
+      port_node_run_id:
+        description: Port workflow node run ID (wfnr_) for log streaming
         required: false
         type: string
 
@@ -43,18 +43,40 @@ jobs:
     env:
       PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
       PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      PORT_BASE_URL: https://api.us.port.io
       SPACELIFT_API_KEY_ID: ${{ secrets.SPACELIFT_API_KEY_ID }}
       SPACELIFT_API_KEY_SECRET: ${{ secrets.SPACELIFT_API_KEY_SECRET }}
       SPACELIFT_API_ENDPOINT: https://ajoanes98.app.us.spacelift.io/graphql
+      PORT_NODE_RUN_ID: ${{ inputs.port_node_run_id }}
 
     steps:
-      - name: Log provisioning request
+      - name: Report provisioning started to Port
+        if: env.PORT_NODE_RUN_ID != ''
         run: |
-          echo "🚀 Provisioning AI dev environment for ${{ inputs.service }}"
-          echo "Developer: ${{ inputs.developer }}"
-          echo "AI tooling: ${{ inputs.ai_tooling }}"
-          echo "LiteLLM tier: ${{ inputs.litellm_tier }}"
-          echo "TTL: ${{ inputs.environment_ttl }}"
+          TOKEN=$(curl -sS -X POST "$PORT_BASE_URL/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$PORT_CLIENT_ID\",\"clientSecret\":\"$PORT_CLIENT_SECRET\"}" \
+            | jq -r '.accessToken')
+          curl -sS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/$PORT_NODE_RUN_ID/logs" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg msg "🚀 Provisioning AI dev environment for ${{ inputs.service }}" \
+              '{logs:[{level:"INFO",message:$msg}]}')"
+          curl -sS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/$PORT_NODE_RUN_ID/logs" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg dev "${{ inputs.developer }}" \
+              --arg tools "${{ inputs.ai_tooling }}" \
+              --arg tier "${{ inputs.litellm_tier }}" \
+              --arg ttl "${{ inputs.environment_ttl }}" \
+              '{logs:[
+                {level:"INFO",message:("Developer: " + $dev)},
+                {level:"INFO",message:("AI tooling: " + $tools)},
+                {level:"INFO",message:("LiteLLM tier: " + $tier)},
+                {level:"INFO",message:("TTL: " + $ttl)}
+              ]}')"
 
       - name: Authenticate to Spacelift
         id: spacelift
@@ -66,10 +88,28 @@ jobs:
           if [ -z "$JWT" ]; then
             echo "⚠️ Spacelift auth failed — continuing with simulated workspace ID"
             echo "workspace_id=ws-${{ inputs.service }}-simulated" >> "$GITHUB_OUTPUT"
+            echo "spacelift_status=simulated" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "workspace_id=ws-${{ inputs.service }}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "spacelift_status=authenticated" >> "$GITHUB_OUTPUT"
           echo "✅ Spacelift authenticated"
+
+      - name: Report Spacelift status to Port
+        if: env.PORT_NODE_RUN_ID != ''
+        run: |
+          TOKEN=$(curl -sS -X POST "$PORT_BASE_URL/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$PORT_CLIENT_ID\",\"clientSecret\":\"$PORT_CLIENT_SECRET\"}" \
+            | jq -r '.accessToken')
+          MSG="✅ Spacelift authenticated — workspace ${{ steps.spacelift.outputs.workspace_id }}"
+          if [ "${{ steps.spacelift.outputs.spacelift_status }}" = "simulated" ]; then
+            MSG="⚠️ Spacelift auth simulated — workspace ${{ steps.spacelift.outputs.workspace_id }}"
+          fi
+          curl -sS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/$PORT_NODE_RUN_ID/logs" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg msg "$MSG" '{logs:[{level:"INFO",message:$msg}]}')"
 
       - name: Simulate golden-path provisioning
         run: |
@@ -80,26 +120,47 @@ jobs:
           sleep 3
           echo "✅ Provisioning steps complete"
 
-      - name: Mark dev environment active in Port
-        if: inputs.dev_environment_id != ''
-        uses: port-labs/port-github-action@v1
-        with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.us.port.io
-          operation: UPSERT
-          identifier: ${{ inputs.dev_environment_id }}
-          title: ${{ inputs.service }} Dev Environment
-          blueprint: dev_environment
-          properties: |
-            {
-              "status": "active",
-              "spacelift_workspace_id": "${{ steps.spacelift.outputs.workspace_id }}",
-              "copilot_seat_active": true,
-              "claude_code_access": true
-            }
-          relations: |
-            {
-              "service": "${{ inputs.service }}"
-            }
+      - name: Report success to Port
+        if: success() && env.PORT_NODE_RUN_ID != ''
+        run: |
+          TOKEN=$(curl -sS -X POST "$PORT_BASE_URL/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$PORT_CLIENT_ID\",\"clientSecret\":\"$PORT_CLIENT_SECRET\"}" \
+            | jq -r '.accessToken')
+          curl -sS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/$PORT_NODE_RUN_ID/logs" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg ws "${{ steps.spacelift.outputs.workspace_id }}" \
+              '{logs:[
+                {level:"INFO",message:"1. Copilot seat allocated"},
+                {level:"INFO",message:("2. SpaceLift workspace: " + $ws)},
+                {level:"INFO",message:"3. Golden-path repo scaffolded"},
+                {level:"INFO",message:"4. LiteLLM quota configured"},
+                {level:"INFO",message:"✅ Golden-path provisioning complete"}
+              ]}')"
+          curl -sS -X PATCH "$PORT_BASE_URL/v1/workflows/nodes/runs/$PORT_NODE_RUN_ID" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg link "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              --arg ws "${{ steps.spacelift.outputs.workspace_id }}" \
+              '{status:"COMPLETED",result:"SUCCESS",links:[$link],output:{spacelift_workspace_id:$ws}}')"
 
+      - name: Report failure to Port
+        if: failure() && env.PORT_NODE_RUN_ID != ''
+        run: |
+          TOKEN=$(curl -sS -X POST "$PORT_BASE_URL/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$PORT_CLIENT_ID\",\"clientSecret\":\"$PORT_CLIENT_SECRET\"}" \
+            | jq -r '.accessToken')
+          curl -sS -X POST "$PORT_BASE_URL/v1/workflows/nodes/runs/$PORT_NODE_RUN_ID/logs" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg msg "❌ Provisioning failed for ${{ inputs.service }}" \
+              '{logs:[{level:"ERROR",message:$msg}]}')"
+          curl -sS -X PATCH "$PORT_BASE_URL/v1/workflows/nodes/runs/$PORT_NODE_RUN_ID" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"status":"COMPLETED","result":"FAILED"}'
