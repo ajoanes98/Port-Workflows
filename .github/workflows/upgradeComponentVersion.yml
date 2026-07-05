@@ -1,0 +1,163 @@
+name: Upgrade Component Version (Port)
+
+# This workflow is dispatched by the Port self-service action
+# "Upgrade to Recommended Version" (identifier: upgrade_component_to_recommended_version).
+#
+# It lives in ONE automation repo (the repo referenced in the action's webhook URL:
+#   https://api.github.com/repos/<AUTOMATION_GITHUB_ORG>/<AUTOMATION_GITHUB_REPO>/actions/workflows/upgrade-component-version.yml/dispatches
+# ...and it operates on whichever target repo the user selected in the action form.
+#
+# Required secrets in the AUTOMATION repo:
+#   GH_PAT            - a (fine-grained) token with Contents:write + Pull-requests:write on the TARGET repos.
+#                       A classic PAT with `repo` scope also works. The default GITHUB_TOKEN cannot push to
+#                       other repositories, which is why a cross-repo token is needed here.
+#   PORT_CLIENT_ID    - (optional) Port API client id, to write the PR link back onto the Port action run.
+#   PORT_CLIENT_SECRET- (optional) Port API client secret. If either is missing, the Port update step is skipped.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repository:
+        description: "owner/repo to open the upgrade PR in"
+        required: true
+      package_url:
+        description: "Sonatype package URL, e.g. pkg:maven/com.google.guava/guava@25.1-android?type=jar"
+        required: true
+      ecosystem:
+        description: "Component format from Sonatype (maven, npm, pypi, ...)"
+        required: true
+      target_version:
+        description: "Version to upgrade to"
+        required: true
+      current_version:
+        required: false
+        default: ""
+      component_display_name:
+        required: false
+        default: ""
+      requested_by:
+        required: false
+        default: ""
+      run_id:
+        description: "Port action run id (for status reporting)"
+        required: false
+        default: ""
+      component_entity:
+        required: false
+        default: ""
+
+jobs:
+  open-upgrade-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repository }}
+          token: ${{ secrets.GH_PAT }}
+          path: target
+          fetch-depth: 0
+
+      - name: Apply version bump
+        id: bump
+        working-directory: target
+        env:
+          ECOSYSTEM: ${{ inputs.ecosystem }}
+          TARGET_VERSION: ${{ inputs.target_version }}
+          PACKAGE_URL: ${{ inputs.package_url }}
+        run: |
+          set -euo pipefail
+
+          # Strip the "pkg:<eco>/" prefix and the "@version?qualifiers" suffix from the purl
+          purl_path="${PACKAGE_URL#pkg:*/}"
+          purl_path="${purl_path%%@*}"        # drop @version and everything after
+          purl_path="${purl_path%%\?*}"       # (safety) drop ?qualifiers if no @version
+
+          case "$ECOSYSTEM" in
+            npm)
+              # Handles scoped (%40scope/name) and unscoped names
+              NAME=$(python3 -c "import urllib.parse,sys; print(urllib.parse.unquote(sys.argv[1]))" "$purl_path")
+              echo "Setting npm dependency '$NAME' to $TARGET_VERSION in package.json"
+              # Update dependencies + devDependencies if the package is present
+              tmp=$(mktemp)
+              jq --arg n "$NAME" --arg v "$TARGET_VERSION" '
+                (if .dependencies[$n] then .dependencies[$n] = $v else . end)
+                | (if .devDependencies[$n] then .devDependencies[$n] = $v else . end)
+              ' package.json > "$tmp" && mv "$tmp" package.json
+              # Refresh the lockfile if npm is available
+              if [ -f package-lock.json ]; then npm install --package-lock-only --ignore-scripts || true; fi
+              ;;
+
+            maven)
+              # purl_path is "groupId/artifactId"
+              GROUP="${purl_path%/*}"
+              ARTIFACT="${purl_path##*/}"
+              echo "Setting maven dependency $GROUP:$ARTIFACT to $TARGET_VERSION"
+              mvn -B -q versions:use-dep-version \
+                -Dincludes="$GROUP:$ARTIFACT" \
+                -DdepVersion="$TARGET_VERSION" \
+                -DforceVersion=true \
+                -DgenerateBackupPoms=false
+              ;;
+
+            pypi)
+              # Best-effort for requirements.txt style pins. Adjust for poetry/pipenv as needed.
+              NAME="${purl_path##*/}"
+              echo "Pinning $NAME==$TARGET_VERSION in requirements*.txt"
+              found=0
+              for f in $(git ls-files 'requirements*.txt'); do
+                if grep -Eiq "^${NAME}([=<>!~ ]|$)" "$f"; then
+                  sed -Ei "s|^${NAME}([=<>!~].*)?$|${NAME}==${TARGET_VERSION}|I" "$f"
+                  found=1
+                fi
+              done
+              [ "$found" = "1" ] || { echo "::error::Could not find $NAME in any requirements*.txt"; exit 1; }
+              ;;
+
+            *)
+              echo "::error::Ecosystem '$ECOSYSTEM' is not handled yet. Add a case for it in this workflow."
+              exit 1
+              ;;
+          esac
+
+          if git diff --quiet; then
+            echo "::error::No changes were produced. The component may be a transitive dependency, or the manifest layout differs from what this workflow expects."
+            exit 1
+          fi
+
+      - name: Create pull request
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          path: target
+          token: ${{ secrets.GH_PAT }}
+          branch: port/upgrade-${{ inputs.ecosystem }}-${{ inputs.target_version }}-${{ github.run_id }}
+          commit-message: "chore(deps): upgrade ${{ inputs.component_display_name }} to ${{ inputs.target_version }}"
+          title: "Upgrade ${{ inputs.component_display_name }} to ${{ inputs.target_version }}"
+          body: |
+            Automated dependency upgrade requested from Port by **${{ inputs.requested_by }}**.
+
+            - **Component:** `${{ inputs.package_url }}`
+            - **Current version:** `${{ inputs.current_version }}`
+            - **Target version:** `${{ inputs.target_version }}` (Sonatype recommended / next non-failing)
+
+            Generated by the `Upgrade to Recommended Version` self-service action.
+
+      - name: Report PR link back to Port
+        if: steps.cpr.outputs.pull-request-url != '' && inputs.run_id != '' && env.PORT_CLIENT_ID != ''
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PR_URL: ${{ steps.cpr.outputs.pull-request-url }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          # NOTE: use api.us.port.io if you were on the US region. This EU instance uses api.port.io.
+          TOKEN=$(curl -s -X POST https://api.port.io/v1/auth/access_token \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+          curl -s -X PATCH "https://api.port.io/v1/actions/runs/${RUN_ID}" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"link\":[\"${PR_URL}\"],\"message\":\"Opened upgrade PR: ${PR_URL}\"}"
