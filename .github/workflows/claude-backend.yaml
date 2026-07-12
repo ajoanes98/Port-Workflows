@@ -1,0 +1,65 @@
+name: Trigger Claude Code
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_name:
+        required: true
+        description: "The name of the repo to pull code from"
+      command:
+        required: true
+        description: "The command to run"
+      run_id:
+        required: false
+        description: "Port action run ID to update"
+
+permissions:
+  contents: write
+  packages: write
+          
+jobs:
+  claude-generic:
+    env:
+      GITHUB_TOKEN: ${{ secrets.PORT_GITHUB_TOKEN }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PORT_GITHUB_TOKEN }}
+          repository: ${{ inputs.repo_name }}
+          ref: main
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "scorecard-healing-bot"
+          git config --global user.email "scorecard-healing-bot@users.noreply.github.com"
+
+      - name: Execute Claude Code
+        id: claude_execution
+        uses: anthropics/claude-code-base-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          allowed_tools: "Bash,Edit,Write,GlobTool,GrepTool,BatchTool"
+          system_prompt: |
+            You are a senior platform engineer fixing scorecard rule failures.
+            You will receive a specific remediation command targeting exact failing rules.
+            Follow the instructions precisely. Do NOT make any changes directly to
+            the main branch — always commit to a new branch and open a PR.
+            The PR description must include which scorecard rules it fixes.
+          prompt: ${{ inputs.command }}
+
+      - name: Parse and Report Results
+        if: always()
+        run: |
+          EXECUTION_FILE="${{ steps.claude_execution.outputs.execution_file }}"
+          
+          if [ -f "$EXECUTION_FILE" ]; then
+            RESULT=$(cat "$EXECUTION_FILE" | jq -r '.[] | select(.type == "result") | .')
+            if [ "$RESULT" != "" ]; then
+              CONCLUSION=$(echo "$RESULT" | jq -r '.subtype // "unknown"')
+              CLAUDE_RESPONSE=$(echo "$RESULT" | jq -r '.result // ""')
+              echo "Claude conclusion: $CONCLUSION"
+              echo "Claude response: $CLAUDE_RESPONSE"
+            fi
+          fi
