@@ -97,8 +97,8 @@ jobs:
         if: ${{ inputs.run_id != '' && steps.parse_results.outputs.conclusion == 'success' }}
         uses: port-labs/port-github-action@v1
         with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          clientId: ${{ secrets.PORT_CLIENT_ID_WORKSHOP }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET_WORKSHOP }}
           baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.run_id }}
@@ -117,8 +117,8 @@ jobs:
         if: ${{ inputs.run_id != '' && steps.parse_results.outputs.conclusion != 'success' }}
         uses: port-labs/port-github-action@v1
         with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          clientId: ${{ secrets.PORT_CLIENT_ID_WORKSHOP }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET_WORKSHOP }}
           baseUrl: https://api.us.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.run_id }}
