@@ -1,0 +1,81 @@
+name: Sonatype Lifecycle Scan on Dependency Merge
+
+# Closes the loop on the "Security Scorecard Self-Healing" Port automation:
+# trigger (rule fails) -> analyze -> open_pr (Cursor) -> [THIS WORKFLOW] -> Port re-synced -> scorecard heals
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]      # adjust to your default branch
+
+jobs:
+  detect-dependency-change:
+    # Only proceed on an actual merge, not a closed-without-merge PR
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      deps_changed: ${{ steps.filter.outputs.deps_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whether a dependency manifest changed
+        id: filter
+        run: |
+          CHANGED_FILES=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.merge_commit_sha }}")
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          if echo "$CHANGED_FILES" | grep -E -q '(^|/)(package(-lock)?\.json|pom\.xml|build\.gradle(\.kts)?|requirements.*\.txt|Pipfile(\.lock)?|go\.(mod|sum)|Cargo\.(toml|lock)|.*\.csproj|packages\.config)$'; then
+            echo "deps_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deps_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  sonatype-scan:
+    needs: detect-dependency-change
+    if: needs.detect-dependency-change.outputs.deps_changed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      scan-id: ${{ steps.evaluate.outputs.scan-id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Run Sonatype Lifecycle evaluation
+        id: evaluate
+        uses: sonatype/actions/evaluate@v1
+        with:
+          iq-server-url: ${{ secrets.SONATYPE_IQ_SERVER_URL }}
+          username: ${{ secrets.SONATYPE_IQ_USERNAME }}
+          password: ${{ secrets.SONATYPE_IQ_PASSWORD }}
+          application-id: ${{ vars.SONATYPE_APPLICATION_ID }}   # e.g. org-repo naming convention
+          stage: build
+        continue-on-error: true   # don't block Port sync if the policy still fails post-fix
+
+  sync-to-port:
+    needs: sonatype-scan
+    if: always() && needs.sonatype-scan.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get Port access token
+        id: port-auth
+        run: |
+          RESPONSE=$(curl -s -X POST "https://api.getport.io/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\": \"${{ secrets.PORT_CLIENT_ID }}\", \"clientSecret\": \"${{ secrets.PORT_CLIENT_SECRET }}\"}")
+          TOKEN=$(echo "$RESPONSE" | jq -r '.accessToken')
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      # Give Sonatype IQ a moment to finish indexing the new report before
+      # Port's Sonatype integration pulls it.
+      - name: Wait for Sonatype report to settle
+        run: sleep 30
+
+      - name: Trigger Port Sonatype integration resync
+        run: |
+          curl -s -X POST "https://api.getport.io/v1/integration/${{ secrets.PORT_SONATYPE_INTEGRATION_ID }}/resync" \
+            -H "Authorization: Bearer ${{ steps.port-auth.outputs.token }}" \
+            -H "Content-Type: application/json"
