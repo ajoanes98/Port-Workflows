@@ -30,8 +30,8 @@ jobs:
       - name: Report starting to Port
         uses: port-labs/port-github-action@v1
         with:
-          clientId: ${{ secrets.PORT_CLIENT_ID }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          clientId: ${{ secrets.PORT_CLIENT_ID_SC3 }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET_SC3 }}
           baseUrl: https://api.port.io
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
