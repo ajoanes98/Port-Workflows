@@ -1,4 +1,4 @@
-name: Auto-Scale EC2 for Service
+name: Auto-Scale EC2 for Service (Simulated)
 
 on:
   workflow_dispatch:
@@ -21,7 +21,6 @@ on:
         type: string
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
@@ -37,55 +36,67 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           logMessage: |
-            🚀 Starting ${{ inputs.scale_direction }} for service: ${{ inputs.service_identifier }}
+            🚀 [SIMULATED] Starting ${{ inputs.scale_direction }} for service: ${{ inputs.service_identifier }}
             Current avg CPU: ${{ inputs.avg_cpu_utilization }}%
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
+      # ── SIMULATED AWS STEP ─────────────────────────────────────────
+      - name: "[SIM] Find Auto Scaling Group"
+        id: find_asg
+        run: |
+          echo "🔍 [SIM] Querying ASG with tag Service=${{ inputs.service_identifier }}"
+          echo "asg_name=sim-asg-${{ inputs.service_identifier }}" >> $GITHUB_OUTPUT
+          echo "current_capacity=2" >> $GITHUB_OUTPUT
+          echo "max_capacity=6" >> $GITHUB_OUTPUT
+          echo "min_capacity=1" >> $GITHUB_OUTPUT
 
-      - name: Scale EC2 Auto Scaling Group
+      - name: "[SIM] Scale Auto Scaling Group"
         id: scale_asg
         run: |
           DIRECTION="${{ inputs.scale_direction }}"
-
-          ASG_NAME=$(aws autoscaling describe-auto-scaling-groups \
-            --filters "Name=tag:Service,Values=${{ inputs.service_identifier }}" \
-            --query 'AutoScalingGroups[0].AutoScalingGroupName' \
-            --output text)
-
-          if [ "$ASG_NAME" == "None" ] || [ -z "$ASG_NAME" ]; then
-            echo "::error::No Auto Scaling Group found with tag Service=${{ inputs.service_identifier }}"
-            exit 1
-          fi
-
-          CURRENT=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "$ASG_NAME" \
-            --query 'AutoScalingGroups[0].DesiredCapacity' --output text)
-          MAX=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "$ASG_NAME" \
-            --query 'AutoScalingGroups[0].MaxSize' --output text)
-          MIN=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names "$ASG_NAME" \
-            --query 'AutoScalingGroups[0].MinSize' --output text)
+          CURRENT=${{ steps.find_asg.outputs.current_capacity }}
 
           if [ "$DIRECTION" == "scale_up" ]; then
             NEW=$(( CURRENT + 1 ))
-            if [ $NEW -gt $MAX ]; then NEW=$MAX; fi
+            echo "⬆️  [SIM] Scaling UP: ${{ steps.find_asg.outputs.asg_name }} from $CURRENT → $NEW"
           else
             NEW=$(( CURRENT - 1 ))
-            if [ $NEW -lt $MIN ]; then NEW=$MIN; fi
+            echo "⬇️  [SIM] Scaling DOWN: ${{ steps.find_asg.outputs.asg_name }} from $CURRENT → $NEW"
           fi
 
-          echo "Scaling $ASG_NAME from $CURRENT to $NEW (direction: $DIRECTION)"
-          aws autoscaling set-desired-capacity \
-            --auto-scaling-group-name "$ASG_NAME" \
-            --desired-capacity $NEW
-
           echo "new_capacity=$NEW" >> $GITHUB_OUTPUT
-          echo "asg_name=$ASG_NAME" >> $GITHUB_OUTPUT
+          echo "asg_name=${{ steps.find_asg.outputs.asg_name }}" >> $GITHUB_OUTPUT
+      # ── END SIMULATED AWS STEP ─────────────────────────────────────
+
+      # ── REAL: Push updated CPU back to Port to close the feedback loop
+      - name: Get Port access token
+        id: port_token
+        run: |
+          TOKEN=$(curl -s -X POST https://api.port.io/v1/auth/access_token \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"$PORT_CLIENT_ID\",\"clientSecret\":\"$PORT_CLIENT_SECRET\"}" \
+            | jq -r '.accessToken')
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+
+      - name: Update cpu_utilization on simulated cloud resource in Port
+        run: |
+          # After a scale_up we simulate CPU dropping back to healthy (55%)
+          # After a scale_down we simulate CPU rising back to healthy (40%)
+          if [ "${{ inputs.scale_direction }}" == "scale_up" ]; then
+            NEW_CPU=55
+          else
+            NEW_CPU=40
+          fi
+
+          echo "📊 [SIM] Reporting recovered CPU: ${NEW_CPU}% back to Port"
+
+          curl -s -X PATCH \
+            "https://api.port.io/v1/blueprints/cloudResource/entities/sim-ec2-ads-001" \
+            -H "Authorization: Bearer ${{ steps.port_token.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"properties\": {\"cpu_utilization\": ${NEW_CPU}}}"
 
       - name: Report completion to Port
         uses: port-labs/port-github-action@v1
@@ -96,7 +107,8 @@ jobs:
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           logMessage: |
-            ✅ Scaled ASG: ${{ steps.scale_asg.outputs.asg_name }}
+            ✅ [SIMULATED] Scaling complete!
+            ASG: ${{ steps.scale_asg.outputs.asg_name }}
             New desired capacity: ${{ steps.scale_asg.outputs.new_capacity }}
-            Port scorecard will refresh on next AWS integration sync.
+            CPU reset to healthy range → scorecard will recover to Gold on next sync.
           status: SUCCESS
