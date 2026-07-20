@@ -1,0 +1,88 @@
+name: Scale Kubernetes Workload
+
+on:
+  workflow_dispatch:
+    inputs:
+      desired_replicas:
+        required: true
+        description: 'Number of replicas to scale to'
+        type: string
+      port_context:
+        required: true
+        description: 'Action and general context (blueprint, entity, run id, etc...)'
+        type: string
+
+jobs:
+  scale-workload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inform Port of workflow start
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.port.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: Starting scale operation for Kubernetes workload ${{ fromJson(inputs.port_context).entity.title }}
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig.yaml
+          export KUBECONFIG=kubeconfig.yaml
+          kubectl config current-context --insecure-skip-tls-verify || true
+          kubectl cluster-info --request-timeout=10s --insecure-skip-tls-verify || true
+
+      - name: Scale Kubernetes workload
+        run: |
+          export KUBECONFIG=kubeconfig.yaml
+          WORKLOAD_NAME="${{ fromJson(inputs.port_context).entity.title }}"
+          NAMESPACE="${{ fromJson(inputs.port_context).entity.properties.namespace }}"
+          WORKLOAD_TYPE="${{ fromJson(inputs.port_context).entity.properties.kind }}"
+          REPLICAS="${{ inputs.desired_replicas }}"
+          echo "Scaling $WORKLOAD_TYPE: $WORKLOAD_NAME to $REPLICAS replicas in namespace: $NAMESPACE"
+          case $WORKLOAD_TYPE in
+            "Deployment")
+              kubectl --insecure-skip-tls-verify scale deployment/$WORKLOAD_NAME --replicas=$REPLICAS -n $NAMESPACE
+              kubectl --insecure-skip-tls-verify rollout status deployment/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s
+              ;;
+            "StatefulSet")
+              kubectl --insecure-skip-tls-verify scale statefulset/$WORKLOAD_NAME --replicas=$REPLICAS -n $NAMESPACE
+              kubectl --insecure-skip-tls-verify rollout status statefulset/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s
+              ;;
+            "ReplicaSet")
+              kubectl --insecure-skip-tls-verify scale replicaset/$WORKLOAD_NAME --replicas=$REPLICAS -n $NAMESPACE
+              ;;
+            *)
+              echo "Unsupported workload type for scaling: $WORKLOAD_TYPE"
+              exit 1
+              ;;
+          esac
+
+      - name: Inform Port about scaling success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.port.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: 'SUCCESS'
+          logMessage: Successfully scaled Kubernetes workload ${{ fromJson(inputs.port_context).entity.title }}
+          summary: Kubernetes workload scaling completed successfully
+
+      - name: Inform Port about scaling failure
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.port.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: 'FAILURE'
+          logMessage: Failed to scale Kubernetes workload ${{ fromJson(inputs.port_context).entity.title }}
+          summary: Kubernetes workload scaling failed

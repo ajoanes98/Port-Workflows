@@ -1,0 +1,194 @@
+name: Get Kubernetes Pod Logs
+
+on:
+  workflow_dispatch:
+    inputs:
+      port_context:
+        required: true
+        type: string
+        description: "Port context containing entity and runId"
+      inputs:
+        required: false
+        type: string
+        description: "User inputs for the action"
+
+jobs:
+  pod-logs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Parse Port context
+        id: parse-context
+        run: |
+          RUN_ID=$(echo '${{ inputs.port_context }}' | jq -r '.runId // empty')
+          POD_IDENTIFIER=$(echo '${{ inputs.port_context }}' | jq -r '.entity.identifier // empty')
+          POD_TITLE=$(echo '${{ inputs.port_context }}' | jq -r '.entity.title // empty')
+          NAMESPACE=$(echo '${{ inputs.port_context }}' | jq -r '.entity.properties.namespace // empty')
+          CLUSTER=$(echo '${{ inputs.port_context }}' | jq -r '.entity.properties.cluster // empty')
+
+          # Prefer entity title as real pod name; fall back to identifier
+          POD_NAME="$POD_TITLE"
+          if [ -z "$POD_NAME" ] || [ "$POD_NAME" = "null" ]; then
+            POD_NAME="$POD_IDENTIFIER"
+          fi
+
+          if [ -z "$NAMESPACE" ] || [ "$NAMESPACE" = "null" ]; then
+            NAMESPACE="default"
+          fi
+          if [ -z "$CLUSTER" ] || [ "$CLUSTER" = "null" ]; then
+            CLUSTER="default-cluster"
+          fi
+
+          if [ -z "$RUN_ID" ] || [ -z "$POD_NAME" ]; then
+            echo "Missing required fields: RUN_ID=$RUN_ID POD_NAME=$POD_NAME"
+            exit 1
+          fi
+
+          {
+            echo "runId<<EOF"
+            echo "$RUN_ID"
+            echo "EOF"
+            echo "podName<<EOF"
+            echo "$POD_NAME"
+            echo "EOF"
+            echo "podTitle<<EOF"
+            echo "$POD_TITLE"
+            echo "EOF"
+            echo "namespace<<EOF"
+            echo "$NAMESPACE"
+            echo "EOF"
+            echo "cluster<<EOF"
+            echo "$CLUSTER"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Parse user inputs
+        id: parse-inputs
+        run: |
+          if [ -n "${{ inputs.inputs }}" ] && [ "${{ inputs.inputs }}" != "null" ]; then
+            CONTAINER=$(echo '${{ inputs.inputs }}' | jq -r '.container // empty' 2>/dev/null || echo "")
+            TAIL=$(echo '${{ inputs.inputs }}' | jq -r '.tail // "200"' 2>/dev/null || echo "200")
+            FOLLOW=$(echo '${{ inputs.inputs }}' | jq -r '.follow // false' 2>/dev/null || echo "false")
+            SINCE=$(echo '${{ inputs.inputs }}' | jq -r '.since // empty' 2>/dev/null || echo "")
+          else
+            CONTAINER=""
+            TAIL="200"
+            FOLLOW="false"
+            SINCE=""
+          fi
+          {
+            echo "container<<EOF"
+            echo "$CONTAINER"
+            echo "EOF"
+            echo "tail<<EOF"
+            echo "$TAIL"
+            echo "EOF"
+            echo "follow<<EOF"
+            echo "$FOLLOW"
+            echo "EOF"
+            echo "since<<EOF"
+            echo "$SINCE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Inform Port of workflow start
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.port.io
+          operation: PATCH_RUN
+          runId: ${{ steps.parse-context.outputs.runId }}
+          logMessage: "Starting pod logs retrieval for ${{ steps.parse-context.outputs.podTitle }} in namespace ${{ steps.parse-context.outputs.namespace }}..."
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          if [ -n "${{ secrets.KUBECONFIG }}" ]; then
+            echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+            chmod 600 ~/.kube/config
+          else
+            echo "No KUBECONFIG secret found"
+            exit 1
+          fi
+
+      - name: Check if pod exists
+        id: check-pod
+        run: |
+          if kubectl get pod ${{ steps.parse-context.outputs.podName }} -n ${{ steps.parse-context.outputs.namespace }} --insecure-skip-tls-verify >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stream pod logs
+        if: steps.check-pod.outputs.exists == 'true'
+        shell: bash
+        run: |
+          KUBECTL_CMD="kubectl logs ${{ steps.parse-context.outputs.podName }} -n ${{ steps.parse-context.outputs.namespace }} --insecure-skip-tls-verify"
+          if [ -n "${{ steps.parse-inputs.outputs.container }}" ]; then
+            KUBECTL_CMD="$KUBECTL_CMD -c ${{ steps.parse-inputs.outputs.container }}"
+          fi
+          if [ -n "${{ steps.parse-inputs.outputs.tail }}" ]; then
+            KUBECTL_CMD="$KUBECTL_CMD --tail=${{ steps.parse-inputs.outputs.tail }}"
+          fi
+          if [ -n "${{ steps.parse-inputs.outputs.since }}" ]; then
+            KUBECTL_CMD="$KUBECTL_CMD --since=${{ steps.parse-inputs.outputs.since }}"
+          fi
+          set +e
+          LOG_OUTPUT=$($KUBECTL_CMD 2>&1)
+          LOG_STATUS=$?
+          set -e
+          if [ $LOG_STATUS -eq 0 ]; then
+            echo "SUCCESS" > status.txt
+            echo "$LOG_OUTPUT" | head -100 > pod_logs.txt
+          else
+            echo "FAILURE" > status.txt
+            echo "Error: $LOG_OUTPUT" > pod_logs.txt
+          fi
+
+      - name: Handle pod not found
+        if: steps.check-pod.outputs.exists == 'false'
+        run: |
+          echo "FAILURE" > status.txt
+          echo "Pod not found in namespace ${{ steps.parse-context.outputs.namespace }}" > pod_logs.txt
+
+      - name: Prepare summary
+        if: always()
+        id: prepare-summary
+        run: |
+          LOGS_CONTENT=$(cat pod_logs.txt 2>/dev/null || echo "No logs")
+          SUMMARY="## Pod Logs for ${{ steps.parse-context.outputs.podName }}
+
+          **Namespace:** ${{ steps.parse-context.outputs.namespace }}
+          **Status:** $(cat status.txt 2>/dev/null || echo 'UNKNOWN')
+
+          ### Logs:
+          \`\`\`
+          $LOGS_CONTENT
+          \`\`\`"
+          {
+            echo "summary<<EOF"
+            echo "$SUMMARY"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Inform Port about result
+        if: always()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.port.io
+          operation: PATCH_RUN
+          runId: ${{ steps.parse-context.outputs.runId }}
+          status: ${{ steps.check-pod.outputs.exists == 'true' && 'SUCCESS' || 'FAILURE' }}
+          logMessage: ${{ steps.check-pod.outputs.exists == 'true' && 'Pod logs retrieval completed' || 'Pod logs retrieval failed - pod not found' }}
+          summary: ${{ steps.prepare-summary.outputs.summary }}

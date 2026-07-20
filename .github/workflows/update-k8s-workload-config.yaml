@@ -1,0 +1,144 @@
+name: Update Kubernetes Workload Configuration
+
+on:
+  workflow_dispatch:
+    inputs:
+      port_context:
+        required: true
+        description: 'Action and general context (blueprint, entity, run id, etc...)'
+        type: string
+      memory_limit:
+        required: false
+        type: string
+      cpu_limit:
+        required: false
+        type: string
+      memory_request:
+        required: false
+        type: string
+      cpu_request:
+        required: false
+        type: string
+
+jobs:
+  update-workload-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inform Port of workflow start
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.port.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          logMessage: Starting configuration update for Kubernetes workload ${{ fromJson(inputs.port_context).entity.title }}
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig.yaml
+          export KUBECONFIG=kubeconfig.yaml
+          kubectl config current-context || true
+
+      - name: Update workload configuration
+        run: |
+          export KUBECONFIG=kubeconfig.yaml
+          WORKLOAD_NAME="${{ fromJson(inputs.port_context).entity.title }}"
+          NAMESPACE="${{ fromJson(inputs.port_context).entity.properties.namespace }}"
+          WORKLOAD_TYPE="${{ fromJson(inputs.port_context).entity.properties.kind }}"
+
+          MEMORY_LIMIT="${{ inputs.memory_limit }}"
+          CPU_LIMIT="${{ inputs.cpu_limit }}"
+          MEMORY_REQUEST="${{ inputs.memory_request }}"
+          CPU_REQUEST="${{ inputs.cpu_request }}"
+
+          # Fall back to entity properties if inputs empty
+          if [ -z "$MEMORY_LIMIT" ]; then
+            MEMORY_LIMIT="${{ fromJson(inputs.port_context).entity.properties.memory_limit }}"
+          fi
+          if [ -z "$CPU_LIMIT" ]; then
+            CPU_LIMIT="${{ fromJson(inputs.port_context).entity.properties.cpu_limit }}"
+          fi
+          if [ -z "$MEMORY_REQUEST" ]; then
+            MEMORY_REQUEST="${{ fromJson(inputs.port_context).entity.properties.memory_request }}"
+          fi
+          if [ -z "$CPU_REQUEST" ]; then
+            CPU_REQUEST="${{ fromJson(inputs.port_context).entity.properties.cpu_request }}"
+          fi
+
+          echo "Updating $WORKLOAD_TYPE: $WORKLOAD_NAME in $NAMESPACE"
+          echo "Memory Limit: $MEMORY_LIMIT, CPU Limit: $CPU_LIMIT"
+          echo "Memory Request: $MEMORY_REQUEST, CPU Request: $CPU_REQUEST"
+
+          cat > resource-patch.json << PATCH
+          {
+            "spec": {
+              "template": {
+                "spec": {
+                  "containers": [
+                    {
+                      "name": "$WORKLOAD_NAME",
+                      "resources": {
+                        "limits": {
+                          "memory": "$MEMORY_LIMIT",
+                          "cpu": "$CPU_LIMIT"
+                        },
+                        "requests": {
+                          "memory": "$MEMORY_REQUEST",
+                          "cpu": "$CPU_REQUEST"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          PATCH
+
+          case $WORKLOAD_TYPE in
+            "Deployment")
+              kubectl patch deployment $WORKLOAD_NAME -n $NAMESPACE --type='merge' -p "$(cat resource-patch.json)" --insecure-skip-tls-verify
+              kubectl rollout status deployment/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s --insecure-skip-tls-verify
+              ;;
+            "StatefulSet")
+              kubectl patch statefulset $WORKLOAD_NAME -n $NAMESPACE --type='merge' -p "$(cat resource-patch.json)" --insecure-skip-tls-verify
+              kubectl rollout status statefulset/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s --insecure-skip-tls-verify
+              ;;
+            "DaemonSet")
+              kubectl patch daemonset $WORKLOAD_NAME -n $NAMESPACE --type='merge' -p "$(cat resource-patch.json)" --insecure-skip-tls-verify
+              kubectl rollout status daemonset/$WORKLOAD_NAME -n $NAMESPACE --timeout=300s --insecure-skip-tls-verify
+              ;;
+            *)
+              echo "Unsupported workload type: $WORKLOAD_TYPE"
+              exit 1
+              ;;
+          esac
+
+      - name: Inform Port about config update success
+        if: success()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.port.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: 'SUCCESS'
+          logMessage: Successfully updated Kubernetes workload configuration ${{ fromJson(inputs.port_context).entity.title }}
+          summary: Kubernetes workload configuration update completed successfully
+
+      - name: Inform Port about config update failure
+        if: failure()
+        uses: port-labs/port-github-action@v1
+        with:
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: https://api.port.io
+          operation: PATCH_RUN
+          runId: ${{ fromJson(inputs.port_context).runId }}
+          status: 'FAILURE'
+          logMessage: Failed to update Kubernetes workload configuration ${{ fromJson(inputs.port_context).entity.title }}
+          summary: Kubernetes workload configuration update failed
