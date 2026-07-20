@@ -1,27 +1,46 @@
-name: Auto-Scale EC2 for Service (Simulated)
+# Auto-scale EC2 (Port self-healing backend)
+#
+# Dispatched by Port workflow `cpu_utilization_self_healing`
+# via github-ocean `dispatch_workflow` when a cloud resource's
+# cpu_utilization_health scorecard degrades.
+#
+# Copy to: .github/workflows/auto-scale-ec2.yml in your workflows repo.
+# Secrets: PORT_CLIENT_ID, PORT_CLIENT_SECRET (EU org → api.eu.getport.io)
+#
+# Replace the [SIM] steps with real ASG / EC2 API calls for production.
+
+name: Auto-Scale EC2 for Cloud Resource (Simulated)
 
 on:
   workflow_dispatch:
     inputs:
-      service_identifier:
-        description: 'Port service identifier'
+      port_run_id:
+        description: Port workflow run ID for status reporting
         required: true
         type: string
       scale_direction:
-        description: 'scale_up or scale_down'
+        description: scale_up or scale_down
         required: true
         type: string
-      avg_cpu_utilization:
-        description: 'Current average CPU utilization (for logging)'
+      cloud_resource_identifier:
+        description: Port cloudResource entity identifier to scale
+        required: true
+        type: string
+      service_identifier:
+        description: Related service (from used_by), if any
         required: false
         type: string
-      port_run_id:
-        description: 'Port workflow run ID for status reporting'
-        required: true
+      cpu_utilization:
+        description: CPU utilization that triggered the run
+        required: false
         type: string
 
 permissions:
   contents: read
+
+env:
+  # EU Port org (scorecardsWorkshop3). Use https://api.port.io for US orgs.
+  PORT_API_BASE: https://api.eu.getport.io
 
 jobs:
   scale-ec2:
@@ -30,21 +49,22 @@ jobs:
       - name: Report starting to Port
         uses: port-labs/port-github-action@v1
         with:
-          clientId: ${{ secrets.PORT_CLIENT_ID_SC3 }}
-          clientSecret: ${{ secrets.PORT_CLIENT_SECRET_SC3 }}
-          baseUrl: https://api.port.io
+          clientId: ${{ secrets.PORT_CLIENT_ID }}
+          clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
+          baseUrl: ${{ env.PORT_API_BASE }}
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           logMessage: |
-            🚀 [SIMULATED] Starting ${{ inputs.scale_direction }} for service: ${{ inputs.service_identifier }}
-            Current avg CPU: ${{ inputs.avg_cpu_utilization }}%
+            🚀 [SIMULATED] Starting ${{ inputs.scale_direction }} for cloud resource: ${{ inputs.cloud_resource_identifier }}
+            Related service: ${{ inputs.service_identifier }}
+            Current CPU: ${{ inputs.cpu_utilization }}%
 
       # ── SIMULATED AWS STEP ─────────────────────────────────────────
       - name: "[SIM] Find Auto Scaling Group"
         id: find_asg
         run: |
-          echo "🔍 [SIM] Querying ASG with tag Service=${{ inputs.service_identifier }}"
-          echo "asg_name=sim-asg-${{ inputs.service_identifier }}" >> $GITHUB_OUTPUT
+          echo "🔍 [SIM] Querying ASG for resource=${{ inputs.cloud_resource_identifier }} service=${{ inputs.service_identifier }}"
+          echo "asg_name=sim-asg-${{ inputs.cloud_resource_identifier }}" >> $GITHUB_OUTPUT
           echo "current_capacity=2" >> $GITHUB_OUTPUT
           echo "max_capacity=6" >> $GITHUB_OUTPUT
           echo "min_capacity=1" >> $GITHUB_OUTPUT
@@ -71,7 +91,7 @@ jobs:
       - name: Get Port access token
         id: port_token
         run: |
-          TOKEN=$(curl -s -X POST https://api.port.io/v1/auth/access_token \
+          TOKEN=$(curl -s -X POST "${PORT_API_BASE}/v1/auth/access_token" \
             -H "Content-Type: application/json" \
             -d "{\"clientId\":\"$PORT_CLIENT_ID\",\"clientSecret\":\"$PORT_CLIENT_SECRET\"}" \
             | jq -r '.accessToken')
@@ -80,7 +100,7 @@ jobs:
           PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
 
-      - name: Update cpu_utilization on simulated cloud resource in Port
+      - name: Update cpu_utilization on the triggering cloud resource in Port
         run: |
           # After a scale_up we simulate CPU dropping back to healthy (55%)
           # After a scale_down we simulate CPU rising back to healthy (40%)
@@ -90,10 +110,11 @@ jobs:
             NEW_CPU=40
           fi
 
-          echo "📊 [SIM] Reporting recovered CPU: ${NEW_CPU}% back to Port"
+          RESOURCE="${{ inputs.cloud_resource_identifier }}"
+          echo "📊 [SIM] Reporting recovered CPU: ${NEW_CPU}% for ${RESOURCE}"
 
           curl -s -X PATCH \
-            "https://api.port.io/v1/blueprints/cloudResource/entities/sim-ec2-ads-001" \
+            "${PORT_API_BASE}/v1/blueprints/cloudResource/entities/${RESOURCE}" \
             -H "Authorization: Bearer ${{ steps.port_token.outputs.token }}" \
             -H "Content-Type: application/json" \
             -d "{\"properties\": {\"cpu_utilization\": ${NEW_CPU}}}"
@@ -103,11 +124,12 @@ jobs:
         with:
           clientId: ${{ secrets.PORT_CLIENT_ID }}
           clientSecret: ${{ secrets.PORT_CLIENT_SECRET }}
-          baseUrl: https://api.port.io
+          baseUrl: ${{ env.PORT_API_BASE }}
           operation: PATCH_RUN
           runId: ${{ inputs.port_run_id }}
           logMessage: |
             ✅ [SIMULATED] Scaling complete!
+            Resource: ${{ inputs.cloud_resource_identifier }}
             ASG: ${{ steps.scale_asg.outputs.asg_name }}
             New desired capacity: ${{ steps.scale_asg.outputs.new_capacity }}
             CPU reset to healthy range → scorecard will recover to Gold on next sync.
