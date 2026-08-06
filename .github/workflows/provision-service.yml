@@ -74,4 +74,4 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{"status": "SUCCESS", "message": {"message": "Service provisioned across K8s, Terraform, DNS, and Firewall"}}'
         env:
-          PORT_API_TOKEN: ${{ secrets.PORT_API_TOKEN }}
+          PORT_API_TOKEN: ${{ secrets.PORT_API_TOKEN_SCHWAB }}
