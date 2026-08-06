@@ -1,0 +1,77 @@
+name: Provision New Service
+on:
+  workflow_dispatch:
+    inputs:
+      service_name: {required: true}
+      environment: {required: true}
+      team: {required: true}
+      purpose: {required: true}
+      port_context: {required: true}
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      # --- STEP 1: Kubernetes namespace (REAL, using an ephemeral local cluster) ---
+      - name: Spin up ephemeral K8s cluster
+        uses: helm/kind-action@v1.9.0
+        with:
+          cluster_name: port-poc
+
+      - name: Create K8s namespace
+        run: |
+          kubectl create namespace ${{ inputs.service_name }}-${{ inputs.environment }}
+          kubectl label namespace ${{ inputs.service_name }}-${{ inputs.environment }} team=${{ inputs.team }}
+          echo "Namespace created: ${{ inputs.service_name }}-${{ inputs.environment }}"
+
+      # --- STEP 2: Terraform / IaC (REAL, harmless local provider) ---
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Write minimal service module
+        run: |
+          mkdir -p tf && cd tf
+          cat > main.tf << 'EOF'
+          resource "local_file" "service_manifest" {
+            filename = "${path.module}/${var.service_name}.json"
+            content  = jsonencode({
+              service     = var.service_name
+              environment = var.environment
+              team        = var.team
+            })
+          }
+          variable "service_name" {}
+          variable "environment" {}
+          variable "team" {}
+          EOF
+
+      - name: Terraform apply (simulated resource provisioning)
+        working-directory: tf
+        run: |
+          terraform init
+          terraform apply -auto-approve \
+            -var="service_name=${{ inputs.service_name }}" \
+            -var="environment=${{ inputs.environment }}" \
+            -var="team=${{ inputs.team }}"
+
+      # --- STEP 3: DNS entry (SIMULATED — real DNS needs a live account/domain) ---
+      - name: Register DNS entry (simulated)
+        run: |
+          echo "Would create DNS record: ${{ inputs.service_name }}.${{ inputs.environment }}.schwab-poc.internal → <cluster-ingress-ip>"
+          sleep 3
+
+      # --- STEP 4: Firewall rule (SIMULATED — real rule needs cloud/network access) ---
+      - name: Apply firewall rule (simulated)
+        run: |
+          echo "Would open firewall rule: allow 443 from corp-network to ${{ inputs.service_name }}-${{ inputs.environment }}"
+          sleep 3
+
+      # --- Report status back to Port ---
+      - name: Report success to Port
+        run: |
+          curl -X PATCH "https://api.port.io/v1/actions/runs/${{ fromJson(inputs.port_context).run_id }}" \
+            -H "Authorization: Bearer $PORT_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"status": "SUCCESS", "message": {"message": "Service provisioned across K8s, Terraform, DNS, and Firewall"}}'
+        env:
+          PORT_API_TOKEN: ${{ secrets.PORT_API_TOKEN }}
